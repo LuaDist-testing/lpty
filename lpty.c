@@ -2,7 +2,7 @@
  *
  * provide simple pty interface for lua
  *
- * Gunnar Zötl <gz@tset.de>, 2010-2013
+ * Gunnar Zötl <gz@tset.de>, 2010-2014
  * Released under MIT/X11 license. See file LICENSE for details.
  */
 
@@ -26,7 +26,7 @@ extern char** environ;
 #include "lua.h"
 #include "lauxlib.h"
 
-#define LPTY_VERSION "1.0.1"
+#define LPTY_VERSION "1.1"
 
 #define LPTY "lPtyHandler"
 #define TOSTRING_BUFSIZ 64
@@ -40,6 +40,7 @@ extern char** environ;
  * this module this will do */
 #define lua_setuservalue(L, idx) lua_setfenv(L, idx)
 #define lua_getuservalue(L, idx) lua_getfenv(L, idx)
+#define LUA_OK 0
 #endif
 
 /* structure for pty userdata */
@@ -50,6 +51,7 @@ typedef struct _lpty_pty {
 	struct {
 		unsigned int throwerrors :1;
 		unsigned int nolocalecho :1;
+		unsigned int rawmode :1;
 		unsigned int usepath :1;
 	} flags;
 } lPty;
@@ -256,7 +258,7 @@ static const luaL_Reg lpty_meta[] = {
  * 	+1	nil
  * 	+2	error messagel
  */
-static int _lpty_error(lua_State *L, int dothrow, char *msg, ...)
+static int _lpty_error(lua_State *L, int dothrow, const char *msg, ...)
 {
 	va_list ap;
 	va_start(ap, msg);
@@ -294,6 +296,25 @@ static int _lpty_optboolean(lua_State *L, int idx, int dfl)
 		return lua_toboolean(L, idx);
 }
 
+/* _lpty_gettime
+ * 
+ * returns the return value of gettimeofday() converted to a double value.
+ * 
+ * Arguments:
+ * 	-
+ * 
+ * Returns:
+ * 	a double value containing the number of seconds since the beginning
+ * 	of the epoch, in microsecond resolution, or -1 in case of an error.
+ */
+static double _lpty_gettime(void)
+{
+	struct timeval tv;
+	if (gettimeofday(&tv, NULL) != 0)
+		return -1;
+	return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
+}
+
 /* lpty_new
  *
  * create a new lpty object, initialize it, put it into a userdata and
@@ -316,31 +337,34 @@ static int lpty_new(lua_State *L)
 	int failed = (mfd < 0);
 	int throwe = 0;	/* throw errors, default = no */
 	int usep = 1;	/* use path, default = yes */
-	int nle = 0;	/* no local echo, default 0 */
+	int nle = 0;	/* no local echo, default = no */
+	int rawm = 0;	/* raw mode, default = no */
 	
 	/* check for options */
 	if (lua_gettop(L) > 0) {
 		luaL_checktype(L, 1, LUA_TTABLE);
-		lua_pushstring(L, "throw_errors");
-		lua_rawget(L, 1);
-		throwe = _lpty_optboolean(L, 2, throwe);
-		lua_pop(L, 1);
 		
-		lua_pushstring(L, "no_local_echo");
-		lua_rawget(L, 1);
-		nle = _lpty_optboolean(L, 2, nle);
-		lua_pop(L, 1);
-		
-		lua_pushstring(L, "use_path");
-		lua_rawget(L, 1);
-		usep = _lpty_optboolean(L, 2, usep);
-		lua_pop(L, 1);
+		lua_pushnil(L);
+		while (lua_next(L, 1) != 0) {
+			const char* k = lua_tostring(L, -2);
+			if (!strcmp(k, "throw_errors"))
+				throwe = lua_toboolean(L, -1);
+			else if (!strcmp(k, "no_local_echo"))
+				nle = lua_toboolean(L, -1);
+			else if (!strcmp(k, "raw_mode"))
+				rawm = lua_toboolean(L, -1);
+			else if (!strcmp(k, "use_path"))
+				usep = lua_toboolean(L, -1);
+			else
+				return _lpty_error(L, 1, "invalid configuration option: %s", k);
+			
+			lua_pop(L, 1);
+		}
 	}
 	
 	if (mfd > 0) {
 		/* setup parent side of pty. BEWARE:
 		 * behaviour of grantpt is undefined if a SIGCHLD handler is active */
-		struct sigaction oldhandler;
 		_lpty_set_sigchld_handler(SIG_DFL);
 		failed = grantpt(mfd);
 		_lpty_set_sigchld_handler(_lpty_sigchld_handler);
@@ -369,8 +393,9 @@ static int lpty_new(lua_State *L)
 	pty->m_fd = mfd;
 	pty->s_fd = sfd;
 	pty->child = -1;
-	pty->flags.nolocalecho = nle;
 	pty->flags.throwerrors = throwe;
+	pty->flags.nolocalecho = nle;
+	pty->flags.rawmode = rawm;
 	pty->flags.usepath = usep;
 
 	return 1;
@@ -440,7 +465,7 @@ static void _lpty_freeenv(char **env)
 {
 	char *c, **e = env;
 	if (env == NULL) return;
-	while (c = *e++)
+	while ((c = *e++))
 		free(c);
 	free(env);
 }
@@ -497,6 +522,46 @@ static int _lpty_execvpe(const char *filename, char *const argv[], char *const e
 	}
 }
 
+/* _lpty_tsetnoecho
+ * 
+ * turns off local echo for the tty
+ * 
+ * Arguments:
+ * 	tty	the file descriptor of the tty to change settings for
+ * 
+ * Returns:
+ * 	0 on success, -1 on failure
+ */
+static int _lpty_tsetnoecho(int tty)
+{
+	struct termios ttys;
+	tcgetattr(tty, &ttys);
+	ttys.c_lflag &= ~(ICANON | ECHO);
+	return tcsetattr(tty, TCSANOW, &ttys);
+}
+
+/* _lpty_tsetraw
+ * 
+ * sets the terminal into raw mode
+ * 
+ * Arguments:
+ * 	tty	the file descriptor of the tty to change settings for
+ * 
+ * Returns:
+ * 	0 on success, -1 on failure
+ */
+static int _lpty_tsetraw(int tty)
+{
+	struct termios ttys;
+	tcgetattr(tty, &ttys);
+	ttys.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP
+		| INLCR | IGNCR | ICRNL | IXON);
+	ttys.c_oflag &= ~OPOST;
+	ttys.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+	ttys.c_cflag &= ~(CSIZE | PARENB);
+	ttys.c_cflag |= CS8;
+	return tcsetattr(tty, TCSANOW, &ttys);
+}
 
 /* lpty_startproc
  *
@@ -545,13 +610,12 @@ static int lpty_startproc(lua_State *L)
 			args[nargs] = NULL;
 			
 			/* suppress local echo on slave side if wanted */
-			if (pty->flags.nolocalecho) {
-				struct termios ttys;
+			if (pty->flags.nolocalecho)
+				_lpty_tsetnoecho(ttyfd);
 
-				tcgetattr(ttyfd, &ttys);
-				ttys.c_lflag &= ~(ECHO | ICANON);
-				tcsetattr(ttyfd, TCSANOW, &ttys);
-			}
+			/* put terminal into raw mode if wanted */
+			if (pty->flags.rawmode)
+				_lpty_tsetraw(ttyfd);
 
 			/* prepare child processes standard file handles */
 			dup2(ttyfd, 0);
@@ -662,17 +726,16 @@ static int lpty_hasproc(lua_State *L)
  *	1	lpty userdata
  *
  * Lua Returns:
- *	+1, +2	false, nil if the is an active subprocess
+ *	+1, +2	false, nil if there is an active subprocess
  * 			'exit', code if the previous subprocess exited via exit
- * 			'sig', signum if the previous process was terminated by a signal
- * 			'unk', 0 if we have no information about the previous process
+ * 			'sig', signum if the previous subprocess was terminated by a signal
+ * 			'unk', 0 if we have no information about the previous subprocess
  */
 static int lpty_exitstatus(lua_State *L)
 {
 	lPty *pty = lpty_checkLPty(L, 1);
 	if (!_lpty_hasrunningchild(pty) && pty->child != -1) {
 		int i;
-		int r = 0;
 		for (i = 0; i < EXITSTATUS_BUFSIZ; ++i) {
 			if (_lpty_exitstatus_buffer.ecodes[i].child == pty->child) {
 				int status = _lpty_exitstatus_buffer.ecodes[i].status;
@@ -683,7 +746,6 @@ static int lpty_exitstatus(lua_State *L)
 					lua_pushliteral(L, "sig");
 					lua_pushnumber(L, WTERMSIG(status));
 				}
-				r = 2;
 				break;
 			}
 		}
@@ -727,7 +789,7 @@ static int lpty_getenviron(lua_State *L)
 	if (lua_isnil(L, -1)) {
 		lua_pop(L, 1);
 		lua_newtable(L);
-		while (c = *e++) {
+		while ((c = *e++)) {
 			if (strlen(c) >= buflen) {
 				buflen += strlen(c);
 				buf = realloc(buf, buflen);
@@ -876,6 +938,122 @@ static int lpty_read(lua_State *L)
 	return 1;
 }
 
+/* lpty_readline
+ *
+ * read a line from the master side of a pty.
+ *
+ * Arguments:
+ *	L	Lua State
+ *
+ * Lua Stack:
+ *	1	lpty userdata
+ * 	2	(optional) timeout in seconds
+ *
+ * Lua Returns:
+ *	+1	the data read from the master side of the pty, or nil if the read timed
+ * 		out
+ * 
+ * Note:
+ * 	you also read back the stuff written to the pty with lpty_write() below!
+ */
+static int lpty_readline(lua_State *L)
+{
+	lPty *pty = lpty_checkLPty(L, 1);
+	int wantnl = _lpty_optboolean(L, 2, 0);
+	double timeo = (double)luaL_optnumber(L, 3, -1);
+	char buf[READER_BUFSIZ]; // should probably be more flexible
+	int rd = 0;
+	int ok = 1, isline = 0;
+	double start = _lpty_gettime();
+	double tmo = timeo;
+
+	if (start < 0)
+		return _lpty_error(L, pty->flags.throwerrors, "lpty readline failed: (%d) %s", errno, strerror(errno));
+
+	if (timeo < 0) {
+		tmo = 0;
+		ok = _lpty_waitfordata(pty, (2^32)-1, 0);
+	}
+		
+	do {
+		ok = _lpty_waitfordata(pty, tmo, 0);
+			
+		if (ok > 0) {
+			if (read(pty->m_fd, buf + rd, 1) > 0) {
+				if (buf[rd] == '\n')
+					isline = 1;
+				++rd;
+			} else {
+				ok = 0;
+			}
+		}
+		if (!isline && ok && timeo > 0) {
+			double now = _lpty_gettime();
+
+			if (now < 0)
+				return _lpty_error(L, pty->flags.throwerrors, "lpty readline failed: (%d) %s", errno, strerror(errno));
+		
+			if (now - timeo >= start)
+				isline = 1;
+			else {
+				tmo = timeo + start - now;
+				if (tmo < 0) tmo = 0;
+				ok = 1;
+			}
+		}
+	} while (rd < READER_BUFSIZ && !isline && ok);
+	
+	if (rd > 0) {
+		if (!wantnl && buf[rd-1] == '\n') --rd;
+		if (!wantnl && buf[rd-1] == '\r') --rd;
+		buf[rd] = 0;
+		lua_pushstring(L, buf);
+	/* we don't consider EINTR and ECHILD errors */
+	} else if (errno && (errno != EINTR) && (errno != ECHILD))
+		return _lpty_error(L, pty->flags.throwerrors, "lpty readline failed: (%d) %s", errno, strerror(errno));
+	else
+		lua_pushnil(L);
+	return 1;
+}
+
+/* lpty_expect
+ * 
+ * reads lines from the input until a pattern is matched. The actual
+ * function is written in lua and available as the first upvalue to this
+ * function. See luaopen_lpty() below.
+ * 
+ * Arguments:
+ * 	L	Lua State
+ * 
+ * Lua Stack:
+ * 	1	lpty userdata
+ * 	2	pattern to look for
+ * 	3	(opt) boolean whether to match plainly (true) or pattern (false, default)
+ * 	4	(opt) timeout in seconds
+ *
+ * Lua Returns:
+ * 	+1...	matches
+ */
+static int lpty_expect(lua_State *L)
+{
+	lPty *pty = lpty_checkLPty(L, 1);
+	(void) luaL_checkstring(L, 2);
+	(void) _lpty_optboolean(L, 3, 0);
+	(void) luaL_optnumber(L, 4, 0);
+	int nargs = lua_gettop(L);
+	
+	lua_pushvalue(L, lua_upvalueindex(1));
+	lua_pushvalue(L, 1);
+	lua_pushvalue(L, 2);
+	if (nargs > 2) lua_pushvalue(L, 3);
+	if (nargs > 3) lua_pushvalue(L, 4);
+	if (lua_pcall(L, nargs, LUA_MULTRET, 0) != LUA_OK) {
+		const char* err = lua_tostring(L, -1);
+		_lpty_error(L, pty->flags.throwerrors, err);
+	}
+	return lua_gettop(L) - nargs;
+}
+
 /* lpty_sendok
  *
  * Check wether the master side of this pty can accept data from us
@@ -1021,6 +1199,39 @@ static int lpty_getfd(lua_State *L)
 	return 1;
 }
 
+/* lpty_getflags
+ *
+ * Get the creation flags of the pty
+ *
+ * Arguments:
+ *	L	Lua state
+ *
+ * Lua stack:
+ 	1	lpty userdata
+ *
+ * Lua returns:
+ *	+1	a table containing flags and values, as specified for lpty.new()
+ */
+static int lpty_getflags(lua_State *L)
+{
+	lPty *pty = lpty_checkLPty(L, 1);
+	lua_newtable(L);
+	lua_pushliteral(L, "throw_errors");
+	lua_pushboolean(L, pty->flags.throwerrors);
+	lua_rawset(L, -3);
+	lua_pushliteral(L, "no_local_echo");
+	lua_pushboolean(L, pty->flags.nolocalecho);
+	lua_rawset(L, -3);
+	lua_pushliteral(L, "raw_mode");
+	lua_pushboolean(L, pty->flags.rawmode);
+	lua_rawset(L, -3);
+	lua_pushliteral(L, "use_path");
+	lua_pushboolean(L, pty->flags.usepath);
+	lua_rawset(L, -3);
+	return 1;
+}
+
+
 /* Function list / object metatable
  */
 static const struct luaL_Reg lpty [] ={
@@ -1034,13 +1245,40 @@ static const struct luaL_Reg lpty [] ={
 	{"setenviron", lpty_setenviron},
 	{"readok", lpty_readok},
 	{"read", lpty_read},
+	{"readline", lpty_readline},
+	{"expect", lpty_expect},
 	{"sendok", lpty_sendok},
 	{"send", lpty_send},
 	{"flush", lpty_flush},
 	{"getfd", lpty_getfd},
+	{"getflags", lpty_getflags},
 	
 	{NULL, NULL}
 };
+
+/* _lpty_helper_gettime
+ * 
+ * Returns the current time, as returned by gettimeofday(), converted to
+ * a double value.
+ * this function is not exported, it is a helper for the expect function.
+ * 
+ * Arguments:
+ * 	L	Lua state
+ * 
+ * Lua Stack:
+ * 	-
+ * 
+ * Lua Returns:
+ * 	
+ */
+static int _lpty_helper_gettime(lua_State *L)
+{
+	double tm = _lpty_gettime();
+	lua_pushnumber(L, tm);
+	return 1;
+}
+
+#include "expectsrc.inc"
 
 /* luaopen_lpty
  * 
@@ -1057,6 +1295,16 @@ int luaopen_lpty(lua_State *L)
 	_lpty_exitstatus_buffer.cur = 0;
 
 	luaL_newlib(L, lpty);
+	
+	/* add expect method */
+	lua_pushliteral(L, "expect");
+	if (luaL_loadbuffer(L, expectsrc, strlen(expectsrc), "expect") != LUA_OK) {
+		return lua_error(L);
+	}
+	lua_pushcfunction(L, _lpty_helper_gettime);
+	lua_call(L, 1, 1);
+	lua_pushcclosure(L, lpty_expect, 1);
+	lua_rawset(L, -3);
 
 	lua_pushliteral(L, "_VERSION");
 	lua_pushliteral(L, LPTY_VERSION);
@@ -1065,6 +1313,7 @@ int luaopen_lpty(lua_State *L)
 	/* add lPty userdata metatable */
 	luaL_newmetatable(L, LPTY);
 	luaL_setfuncs(L, lpty_meta, 0);
+
 	/* methods */
 	lua_pushliteral(L, "__index");
 	lua_pushvalue(L, -3);

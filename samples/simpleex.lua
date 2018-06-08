@@ -1,6 +1,6 @@
 #!/usr/bin/env lua
 
---[[ simplebc.lua
+--[[ simpleex.lua
  -
  - a very simple example of how to use lpty
  -
@@ -15,7 +15,7 @@ p:startproc("lua")
 p:read()				-- skip startup message
 
 p:send("=111+234\n")
-r = p:read()
+r = p:read(1)
 print("Result is "..r)
 
 p:send("os.exit()\n")	-- terminate lua all friendly-like

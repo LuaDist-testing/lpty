@@ -1,15 +1,15 @@
 -- This file was automatically generated for the LuaDist project.
 
 package = "lpty"
-version = "1.0.1-1"
+version = "1.1-1"
 -- LuaDist source
 source = {
-  tag = "1.0.1-1",
+  tag = "1.1-1",
   url = "git://github.com/LuaDist-testing/lpty.git"
 }
 -- Original source
 -- source = {
--- 	url = "http://www.tset.de/downloads/lpty-1.0.1-1.tar.gz"
+-- 	url = "http://www.tset.de/downloads/lpty-1.1-1.tar.gz"
 -- }
 description = {
 	summary = "A simple facility for lua to control other programs via PTYs.",
@@ -19,22 +19,30 @@ description = {
 		client side of those PTYs as their controlling terminals.
 	]],
 	homepage = "http://www.tset.de/lpty/",
-	license = "MIT/X11",
+	license = "MIT",
 	maintainer = "Gunnar Zötl <gz@tset.de>"
 }
 supported_platforms = {
 	"unix"
 }
 dependencies = {
-	"lua >= 5.1"
+	"lua >= 5.1, < 5.3"
 }
 
 build = {
-	type = "builtin",
-	modules = {
-		lpty = {
-			sources = { "lpty.c" },
-		},
-	},
+	type = "make",
 	copy_directories = { 'doc', 'samples' },
+	build_variables = {
+			CFLAGS="$(CFLAGS)",
+			LIBFLAG="$(LIBFLAG)",
+			LUA_LIBDIR="$(LUA_LIBDIR)",
+			LUA_BINDIR="$(LUA_BINDIR)",
+			LUA_INCDIR="$(LUA_INCDIR)",
+	},
+	install_variables = {
+			INST_PREFIX="$(PREFIX)",
+			INST_LIBDIR="$(LIBDIR)",
+			INST_LUADIR="$(LUADIR)",
+			INST_CONFDIR="$(CONFDIR)",
+	},
 }

@@ -4,7 +4,7 @@ lpty
 
    a library that allows lua to start processes and control them via pty
 
-   Author: Gunnar Zötl , 2010-2013.
+   Author: Gunnar Zötl , 2010-2014.
    Released under MIT/X11 license. See file LICENSE for details.
 
 Introduction
@@ -13,8 +13,9 @@ Introduction
    to fork a process and run it under pty control. It does not try to
    mimic the posix API but instead focuses on the function of running and
    controlling a program. The interface is very bare bones, no additional
-   functionality is provided, especially nothing like expect, which should
-   be a different package.
+   functionality is provided, especially nothing like a full blown expect,
+   which should be a different package. A rather simple version of expect
+   is available, however.
 
    This has been developed on Linux and tested on MacOS X. It should
    compile and run on any platform supporting the Unix 98 interface to
@@ -69,6 +70,9 @@ Using
                 be echoed back to the parent side, otherwise it will be
                 echoed back. Default is false.
                 Beware that this may not always work as expected.
+
+        raw_mode
+                If true, sets the terminal to raw mode. Default is false.
 
         use_path
                 If true, the pty:startproc() method for the created pty
@@ -177,6 +181,11 @@ Using
 
   Communication
 
+   Where the following functions have a timeout argument, the timeout is
+   specified in seconds. The value can be fractional, i.e. you can specify
+   a timeout of 0.1 seconds. The resolution depends on the underlying
+   system.
+
    pty:readok([timeout])
           returns true if the pty has data available to be read, false
           otherwise. If a timeout value is specified, the call will wait
@@ -204,6 +213,45 @@ Using
           zero, this will leave a maximum of 4095 bytes to be read in one
           go. In order to fetch all available data, just loop while
           pty:readok() returns true and concatenate the results.
+
+   pty:readline([wantnl [, timeout]])
+          reads an individual line from the pty. A line in this case is
+          defined as either everything that can be read up to and
+          including the next newline character, or everything that can be
+          read until there is nothing more to read from the pty. If you
+          can read faster than the remote side writes, this may mean that
+          your line is truncated.
+
+          If wantnl is specified and true, the closing newline character,
+          if present, is returned at the end of the string, otherwise it
+          will be removed.
+
+          Note that, as long as we actually can read stuff from the pty,
+          the call will not time out, even if all the reading takes longer
+          than the timeout value specifies.
+
+          The notes for pty:read() also apply here.
+
+   pty:expect(pattern [, plain [, timeout]])
+          consumes all input until pattern is matched. If plain is true,
+          pattern is taken as a literal string, otherwise it is a lua
+          pattern. timeout is a timeout value, in seconds, for the expect
+          operation. Returns the match, or if the pattern has captures,
+          all of the captures, or nil on timeout.
+
+          Note that in any case, pty:expect() will have consumed as much
+          input as it could get. However, as it reads from the pty line by
+          line, only all lines up to and including the one with the match
+          will be consumed, everything after that will still be available.
+
+          Also, as long as we actually can read stuff from the pty, the
+          call will not time out, even if all the reading takes longer
+          than the timeout value specifies.
+
+          Because expect() may read stuff faster than the remote side
+          writes it, you may get spurious matches. It is probably a good
+          idea to call expect with some timeout, unless you know your data
+          is available.
 
    pty:sendok([timeout])
           returns true if the pty can accept data sent to it, false
@@ -246,6 +294,10 @@ Using
           return the file handle of the master side of the pty. This is
           intended for use with luasocket's select() or luaposix's poll()
           and similar functions.
+
+   pty:getflags()
+          return a table with the flags and their values that were used on
+          creation of the pty, as specifiable for lpty.new()
 
 Additional Details
 

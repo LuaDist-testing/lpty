@@ -4,7 +4,7 @@
  -
  - test aspects of lpty
  -
- - Gunnar Zötl <gz@tset.de>, 2010, 2011
+ - Gunnar Zötl <gz@tset.de>, 2010-2014
  - Released under MIT/X11 license. See file LICENSE for details.
 --]]
 
@@ -35,8 +35,10 @@ end
 function check(ok, msg)
 	if ok==false then
 		fail(msg)
+		return false
 	else
 		print "  TEST OK"
+		return true
 	end
 end
 
@@ -194,8 +196,10 @@ else
 end
 
 -- 16
-announce("sending data to no_local_echo pty then checking for data, should return false")
+--announce("sending data to no_local_echo pty then checking for data, should return false")
 ok, val = pcall(lpty.send, pn, "abc\n")
+while pn:readok() do pn:read() end
+--[[
 if not ok then
 	fail(tostring(val))
 else
@@ -206,6 +210,7 @@ else
 		fail(tostring(val))
 	end
 end
+]]
 
 -- 17
 announce("starting test client for no_local_echo pty")
@@ -332,7 +337,7 @@ announce("reading environment from pty, should return a table with stuff in it")
 ok, env = pcall(lpty.getenviron, pn)
 envsiz = 0
 if not ok then
-	fail(tostring(val))
+	fail(tostring(env))
 else
 	ok = true
 	for k, v in pairs(env) do
@@ -344,13 +349,13 @@ end
 
 -- 26
 announce("calling /usr/bin/env with an empty environment, then reading output, should return nothing at all")
-ok = pcall(lpty.setenviron, pn, {})
+ok, err = pcall(lpty.setenviron, pn, {})
 if not ok then
-	fail(tostring(val))
+	fail(tostring(err))
 else
-	ok = pcall(lpty.startproc, pn, '/usr/bin/env')
+	ok, err = pcall(lpty.startproc, pn, '/usr/bin/env')
 	if not ok then
-		fail(tostring(val))
+		fail(tostring(err))
 	else
 		while pn:hasproc() do end
 		ok, val = pcall(lpty.read, pn, 1)
@@ -364,13 +369,13 @@ end
 
 -- 27
 announce("calling /usr/bin/env with {a=1} as its environment, then reading output, should return 'a=1\\n'")
-ok = pcall(lpty.setenviron, pn, {a=1})
+ok, err = pcall(lpty.setenviron, pn, {a=1})
 if not ok then
-	fail(tostring(val))
+	fail(tostring(err))
 else
-	ok = pcall(lpty.startproc, pn, '/usr/bin/env')
+	ok, err = pcall(lpty.startproc, pn, '/usr/bin/env')
 	if not ok then
-		fail(tostring(val))
+		fail(tostring(err))
 	else
 		while pn:hasproc() do end
 		ok, val = pcall(lpty.read, pn, 1)
@@ -389,7 +394,7 @@ ok = pcall(lpty.setenviron, pn, nil)
 ok, env = pcall(lpty.getenviron, pn)
 mysiz = 0
 if not ok then
-	fail(tostring(val))
+	fail(tostring(env))
 else
 	ok = true
 	for k, v in pairs(env) do
@@ -412,6 +417,103 @@ else
 	string.gsub(val, ".-\n", function () cnt = cnt + 1 end)
 	check(cnt == envsiz)
 end
+
+-- cleanup
+pn:endproc()
+pn:flush()
+
+-- 30
+announce("testing readline on a standard pty")
+pn=lpty.new()
+ok, err = pcall(lpty.startproc, pn, "lua", "testclient.lua")
+if not ok then
+	fail(tostring(err))
+else
+	waitabit() -- wait for client to start
+	pn:send("abc\n")
+	pn:send("def\n")
+	waitabit() -- wait for all output to appear
+	ok, val = pcall(lpty.readline, pn)
+	if val == "abc" then
+		ok, val = pcall(lpty.readline, pn)
+		if val == "def" then
+			ok, val = pcall(lpty.readline, pn)
+			if val == "+abc+" then
+				ok, val = pcall(lpty.readline, pn)
+				check(val == "+def+")
+			else
+				fail()
+			end
+		else
+			fail()
+		end
+	else
+		fail()
+	end
+end
+pn:endproc()
+
+-- 31
+announce("testing readline on a raw mode pty")
+pn=lpty.new{raw_mode = true}
+ok, err = pcall(lpty.startproc, pn, "lua", "testclient.lua")
+if not ok then
+	fail(tostring(err))
+else
+	waitabit() -- wait for client to start
+	pn:send("abc\n")
+	pn:send("def\n")
+	waitabit() -- wait for all output to appear
+	ok, val = pcall(lpty.readline, pn)
+	if val == "+abc+" then
+		ok, val = pcall(lpty.readline, pn)
+		check(val == "+def+")
+	else
+		fail()
+	end
+end
+pn:endproc()
+
+-- expect test
+function expecttest(pn)
+	ok, err = pcall(lpty.startproc, pn, "lua")
+	if not ok then
+		fail(tostring(err))
+		return
+	end
+	ok, val = pcall(lpty.expect, pn, "> $", false, 1)
+	if not ok then
+		fail(tostring(val))
+		return
+	end
+	pn:send("loadfile('testclient.lua')()\n")
+	pn:send("abc\n")
+	ok, val = pcall(lpty.expect, pn, "%+([a-z]+)%+", false, 1)
+	if not ok then
+		fail(tostring(val))
+	else
+		check(val == "abc")
+	end
+	pn:endproc()
+end
+
+-- 32
+announce("testing expect on a standard pty")
+pn = lpty.new()
+waitabit()
+expecttest(pn)
+
+-- 33
+announce("testing expect on a no local echo pty")
+pn = lpty.new{no_local_echo = true}
+waitabit()
+expecttest(pn)
+
+-- 34
+announce("testing expect on a raw mode pty")
+pn = lpty.new{raw_mode = true}
+waitabit()
+expecttest(pn)
 
 -- all done
 print("Tests " .. tostring(ntests) .. " failed " .. tostring(nfailed))
