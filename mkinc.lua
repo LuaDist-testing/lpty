@@ -1,6 +1,6 @@
 -- mkinc.lua
 -- makes C include file from lua source
--- Gunnar Zötl <gz@tset.de>, 2010-2014
+-- Gunnar Zötl <gz@tset.de>, 2010-2015
 
 file = arg[1]
 if not file then

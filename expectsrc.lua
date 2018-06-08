@@ -3,7 +3,7 @@
  *
  * expect function for lpty
  *
- * Gunnar Zötl <gz@tset.de>, 2010-2014
+ * Gunnar Zötl <gz@tset.de>, 2010-2015
  * Released under MIT/X11 license. See file LICENSE for details.
 --]]
 

@@ -1,8 +1,16 @@
+-- This file was automatically generated for the LuaDist project.
+
 package = "lpty"
-version = "1.1-1"
+version = "1.2-1"
+-- LuaDist source
 source = {
-	url = "http://www.tset.de/downloads/lpty-1.1-1.tar.gz"
+  tag = "1.2-1",
+  url = "git://github.com/LuaDist-testing/lpty.git"
 }
+-- Original source
+-- source = {
+-- 	url = "http://www.tset.de/downloads/lpty-1.2-1.tar.gz"
+-- }
 description = {
 	summary = "A simple facility for lua to control other programs via PTYs.",
 	detailed = [[
@@ -18,7 +26,7 @@ supported_platforms = {
 	"unix"
 }
 dependencies = {
-	"lua >= 5.1, < 5.3"
+	"lua >= 5.1, <= 5.3"
 }
 
 build = {
@@ -30,6 +38,7 @@ build = {
 			LUA_LIBDIR="$(LUA_LIBDIR)",
 			LUA_BINDIR="$(LUA_BINDIR)",
 			LUA_INCDIR="$(LUA_INCDIR)",
+			LUA="$(LUA)",
 	},
 	install_variables = {
 			INST_PREFIX="$(PREFIX)",

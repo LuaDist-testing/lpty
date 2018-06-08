@@ -1,34 +1,35 @@
 # simple Makefile for lpty. Works for Linux, MacOS X, probably other unixen
 #
-# Gunnar Zötl <gz@tset.de>, 2010-2014
+# Gunnar Zötl <gz@tset.de>, 2010-2015
 # Released under MIT/X11 license. See file LICENSE for details.
 
 # try some automatic discovery
 OS = $(shell uname -s)
 LUAVERSION = $(shell lua -e "print(string.match(_VERSION, '%d+%.%d+'))")
-LUA_BINDIR ?= $(shell dirname `which lua`)
+LUA_BINDIR = $(shell dirname `which lua`)
 LUAROOT = $(shell dirname $(LUA_BINDIR))
 
 # Defaults
 TARGET = lpty.so
 #DEBUG = -g -lefence
 
-CC ?= gcc
-CFLAGS ?= -fPIC -Wall $(DEBUG)
-LUA_INCDIR ?= $(LUAROOT)/include
-LUA_LIBDIR ?= $(LUAROOT)/lib
+CC = gcc
+CFLAGS = -fPIC -Wall $(DEBUG)
+LUA_INCDIR = $(LUAROOT)/include
+LUA_LIBDIR = $(LUAROOT)/lib
+LUA = lua
 
 # OS specialities
 ifeq ($(OS),Darwin)
-LIBFLAG ?= -bundle -undefined dynamic_lookup -all_load
+LIBFLAG = -bundle -undefined dynamic_lookup -all_load
 else
-LIBFLAG ?= -shared
+LIBFLAG = -shared
 endif
 
 # install target locations
 INST_DIR = /usr/local
-INST_LIBDIR ?= $(INST_DIR)/lib/lua/$(LUAVERSION)
-INST_LUADIR ?= $(INST_DIR)/share/lua/$(LUAVERSION)
+INST_LIBDIR = $(INST_DIR)/lib/lua/$(LUAVERSION)
+INST_LUADIR = $(INST_DIR)/share/lua/$(LUAVERSION)
 
 all: $(TARGET)
 
@@ -39,7 +40,7 @@ lpty.o: lpty.c expectsrc.inc
 	$(CC) $(CFLAGS) -I$(LUA_INCDIR) -c $< -o $@
 
 %.inc: %.lua
-	lua mkinc.lua `basename $@ .inc`
+	$(LUA) mkinc.lua `basename $@ .inc`
 
 install: all
 	mkdir -p $(INST_LIBDIR)

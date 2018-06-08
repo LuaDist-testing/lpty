@@ -4,7 +4,7 @@
  -
  - test aspects of lpty
  -
- - Gunnar Zötl <gz@tset.de>, 2010-2014
+ - Gunnar Zötl <gz@tset.de>, 2010-2015
  - Released under MIT/X11 license. See file LICENSE for details.
 --]]
 
@@ -80,8 +80,8 @@ else
 end
 
 -- 4
-announce("reading from pty with a timeout of 1 second, should return nil")
-ok, val = pcall(lpty.read, p, 1)
+announce("reading from pty with a timeout of 0.1 second, should return nil")
+ok, val = pcall(lpty.read, p, 0.1)
 if ok then
 	check(val == nil)
 else
@@ -155,8 +155,8 @@ else
 end
 
 -- 12
-announce("reading from pty with a timeout of 1 second, should return nil")
-ok, val = pcall(lpty.read, p, 1)
+announce("reading from pty with a timeout of 0.1 second, should return nil")
+ok, val = pcall(lpty.read, p, 0.1)
 if ok then
 	check(val == nil)
 else
@@ -176,17 +176,13 @@ function testto(to, tm)
 end
 
 -- 13
-announce("testing timeout 0.5 second by running r:read(0.5) 10 times should take about 5 seconds")
-check(testto(0.5, 5))
+announce("testing timeout 0.1 second by running r:read(0.1) 10 times should take about 1 seconds")
+check(testto(0.1, 1))
 
--- 14
-announce("testing timeout 1.5 second by running r:read(1.5) 10 times should take about 15 seconds")
-check(testto(1.5, 15))
-
--- creating pty with no local echo for remaining tests
+-- creating pty with no local echo for following tests
 pn = lpty.new { no_local_echo = true }
 
--- 15
+-- 14
 announce("checking for data from no_local_echo pty, should return false")
 ok, val = pcall(lpty.readok, pn)
 if ok then
@@ -195,24 +191,7 @@ else
 	fail(tostring(val))
 end
 
--- 16
---announce("sending data to no_local_echo pty then checking for data, should return false")
-ok, val = pcall(lpty.send, pn, "abc\n")
-while pn:readok() do pn:read() end
---[[
-if not ok then
-	fail(tostring(val))
-else
-	ok, val = pcall(lpty.readok, pn)
-	if ok then
-		check(val == false)
-	else
-		fail(tostring(val))
-	end
-end
-]]
-
--- 17
+-- 15
 announce("starting test client for no_local_echo pty")
 ok, val = pcall(lpty.startproc, pn, "lua", "testclient.lua")
 if ok then
@@ -221,8 +200,9 @@ else
 	fail(tostring(val))
 end
 
--- 18
+-- 16
 announce("reading from no_local_echo pty, should now return '+abc+\\n'")
+ok, val = pcall(lpty.send, pn, "abc\n")
 ok, val = pcall(lpty.read, pn, 0.5)
 if ok then
 	val = string.gsub(val, "[\r\n]+", '.') -- normalize line endings
@@ -231,7 +211,7 @@ else
 	fail(tostring(val))
 end
 
--- 19
+-- 17
 announce("sending 'xxx\\n' to pty, reading back, should return '+xxx+\\n'")
 ok, val = pcall(lpty.send, pn, "xxx\n")
 if not ok then
@@ -246,7 +226,7 @@ else
 	end
 end
 
--- 20
+-- 18
 announce("testing exit status for current child, should return (false, nil)")
 ok, val, code = pcall(lpty.exitstatus, pn)
 if not ok then
@@ -255,7 +235,7 @@ else
 	check((val == false) and (code == nil))
 end
 
--- 21
+-- 19
 announce("quitting child then testing exit status, should return ('exit', 0)")
 ok, val = pcall(lpty.send, pn, "quit\n")
 if not ok then
@@ -270,7 +250,7 @@ else
 	end
 end
 
--- 22
+-- 20
 announce("starting child with invalid executable, then testing exit status, should return ('exit', 1)")
 ok, val = pcall(lpty.startproc, pn, "./firsebrumf")
 if not ok then
@@ -285,7 +265,7 @@ else
 	end
 end
 
--- 23
+-- 21
 announce("starting child process, then killing it, then testing exit status, should return ('sig', *) with *>0")
 ok, val = pcall(lpty.startproc, pn, "lua")
 term = 0
@@ -308,7 +288,7 @@ else
 	end
 end
 
--- 24
+-- 22
 announce("starting child process, then killing it with kill=true, then testing exit status, should return ('sig', *) with *>0 and also not equal to * from prev. test")
 ok, val = pcall(lpty.startproc, pn, "lua")
 if not ok then
@@ -332,7 +312,7 @@ end
 -- cleanup
 pn:flush()
 
--- 25
+-- 23
 announce("reading environment from pty, should return a table with stuff in it")
 ok, env = pcall(lpty.getenviron, pn)
 envsiz = 0
@@ -347,7 +327,7 @@ else
 	check(ok)
 end
 
--- 26
+-- 24
 announce("calling /usr/bin/env with an empty environment, then reading output, should return nothing at all")
 ok, err = pcall(lpty.setenviron, pn, {})
 if not ok then
@@ -367,7 +347,7 @@ else
 	end
 end
 
--- 27
+-- 25
 announce("calling /usr/bin/env with {a=1} as its environment, then reading output, should return 'a=1\\n'")
 ok, err = pcall(lpty.setenviron, pn, {a=1})
 if not ok then
@@ -388,7 +368,7 @@ else
 	end
 end
 
--- 28
+-- 26
 announce("resetting then reading environment from pty, should return a table with stuff in it, size as before we messed with it")
 ok = pcall(lpty.setenviron, pn, nil)
 ok, env = pcall(lpty.getenviron, pn)
@@ -404,7 +384,7 @@ else
 	check(ok and (mysiz == envsiz))
 end
 
--- 29
+-- 27
 announce("calling /usr/bin/env on standard environment, should return as many lines as there are entries in the environment (as counted before)")
 ok = pcall(lpty.startproc, pn, '/usr/bin/env')
 if not ok then
@@ -422,7 +402,7 @@ end
 pn:endproc()
 pn:flush()
 
--- 30
+-- 28
 announce("testing readline on a standard pty")
 pn=lpty.new()
 ok, err = pcall(lpty.startproc, pn, "lua", "testclient.lua")
@@ -453,7 +433,7 @@ else
 end
 pn:endproc()
 
--- 31
+-- 29
 announce("testing readline on a raw mode pty")
 pn=lpty.new{raw_mode = true}
 ok, err = pcall(lpty.startproc, pn, "lua", "testclient.lua")
@@ -497,23 +477,132 @@ function expecttest(pn)
 	pn:endproc()
 end
 
--- 32
+-- 30
 announce("testing expect on a standard pty")
 pn = lpty.new()
 waitabit()
 expecttest(pn)
 
--- 33
+-- 31
 announce("testing expect on a no local echo pty")
 pn = lpty.new{no_local_echo = true}
 waitabit()
 expecttest(pn)
 
--- 34
+-- 32
 announce("testing expect on a raw mode pty")
 pn = lpty.new{raw_mode = true}
 waitabit()
 expecttest(pn)
+
+-- 33
+announce("creating a pty, then setflag()ing it to no_local_echo mode, then back to default")
+pn = lpty.new()
+ok = pn:startproc("lua", "testclient.lua")
+if ok then
+	pn:send("x\n")
+	waitabit()
+	val = pn:read(1)
+	val = string.gsub(val, "[\r\n]+", '.') -- normalize line endings
+	local ok, val1 = pcall(lpty.setflag, pn, 'no_local_echo', true)
+	if ok then
+		pn:send("x\n")
+		waitabit()
+		val1 = pn:read(1)
+		val1 = string.gsub(val1, "[\r\n]+", '.') -- normalize line endings
+		local ok, val2 = pcall(lpty.setflag, pn, 'no_local_echo', false)
+		if ok then
+			pn:send("x\n")
+			waitabit()
+			val2 = pn:read(1)
+			val2 = string.gsub(val2, "[\r\n]+", '.') -- normalize line endings
+			check(val == 'x.+x+.' and val1 == '+x+.' and val2 == 'x.+x+.', val .. ' vs '..val1..' vs '..val2)
+		else
+			fail(tostring(val2))
+		end
+	else
+		fail(tostring(val1))
+	end
+else
+	fail(tostring(val))
+end
+pn:flush()
+
+-- 34
+announce("creating a pty, then setflag()ing it to raw mode, then back to default")
+pn = lpty.new()
+ok = pn:startproc("lua", "testclient.lua")
+if ok then
+	pn:send("x\n")
+	waitabit()
+	val = pn:read(1)
+	val = string.gsub(val, "[\r\n]+", '.') -- normalize line endings
+	local ok, val1 = pcall(lpty.setflag, pn, 'raw_mode', true)
+	if ok then
+		pn:send("x\n")
+		waitabit()
+		val1 = pn:read(1)
+		val1 = string.gsub(val1, "[\r\n]+", '.') -- normalize line endings
+		local ok, val2 = pcall(lpty.setflag, pn, 'raw_mode', false)
+		if ok then
+			pn:send("x\n")
+			waitabit()
+			val2 = pn:read(1)
+			val2 = string.gsub(val2, "[\r\n]+", '.') -- normalize line endings
+			check(val == 'x.+x+.' and val1 == '+x+.' and val2 == 'x.+x+.', val .. ' vs '..val1..' vs '..val2)
+		else
+			fail(tostring(val2))
+		end
+	else
+		fail(tostring(val1))
+	end
+else
+	fail(tostring(val))
+end
+pn:flush()
+
+-- 35
+announce("creating pty with separated stderr stream")
+pn = lpty.new{separate_stderr = true}
+check(pn)
+
+-- 36
+announce("forcing an error on pty with separated error stream. output should appear on readerr() not read()")
+ok, err = pcall(lpty.startproc, pn, "/this must fail")
+if not ok then
+	fail(tostring(err))
+elseif pn:readok(1) == false then
+	check(pn:readerr(1) ~= nil, "readerr() returned no data")
+else
+	fail("data appeared on pty")
+end
+pn:flush()
+
+-- 37
+announce("changing flag on pty to separate_stderr=false then forcing error. output should appear on pty.")
+pn:setflag("separate_stderr", false)
+ok, err = pcall(lpty.startproc, pn, "/this must fail")
+if not ok then
+	fail(tostring(err))
+elseif pn:readok(1) == true then
+	check(pn:readerr(1) == nil, "data appeared on readerr()")
+else
+	fail("no data appeared on pty")
+end
+pn:flush()
+
+-- 38
+announce("changing flag on pty to separate_stderr=true then forcing error. output should appear on readerr() not read()")
+pn:setflag("separate_stderr", true)
+ok, err = pcall(lpty.startproc, pn, "/this must fail")
+if not ok then
+	fail(tostring(err))
+elseif pn:readok(1) == false then
+	check(pn:readerr(1) ~= nil, "readerr() returned no data")
+else
+	fail("data appeared on pty")
+end
+pn:flush()
 
 -- all done
 print("Tests " .. tostring(ntests) .. " failed " .. tostring(nfailed))

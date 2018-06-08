@@ -2,7 +2,7 @@
  *
  * provide simple pty interface for lua
  *
- * Gunnar Zötl <gz@tset.de>, 2010-2014
+ * Gunnar Zötl <gz@tset.de>, 2010-2015
  * Released under MIT/X11 license. See file LICENSE for details.
  */
 
@@ -19,6 +19,7 @@
 #include <sys/wait.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <sys/ioctl.h>
 #include <termios.h>
 
 extern char** environ;
@@ -26,7 +27,7 @@ extern char** environ;
 #include "lua.h"
 #include "lauxlib.h"
 
-#define LPTY_VERSION "1.1"
+#define LPTY_VERSION "1.2"
 
 #define LPTY "lPtyHandler"
 #define TOSTRING_BUFSIZ 64
@@ -47,6 +48,8 @@ extern char** environ;
 typedef struct _lpty_pty {
 	int m_fd;		/* file descriptor for pty master side */
 	int s_fd;		/* file descriptor for pty slave side */
+	int e_mfd;		/* file descriptor for stderr resirection, master side */
+	int e_sfd;		/* file descriptor for stderr resirection, slave side */
 	pid_t child;	/* pid of process attached to this pty */
 	struct {
 		unsigned int throwerrors :1;
@@ -54,6 +57,7 @@ typedef struct _lpty_pty {
 		unsigned int rawmode :1;
 		unsigned int usepath :1;
 	} flags;
+	struct termios otios;	/* terminal flags before we changed anything */
 } lPty;
 
 /*** C level child process related utility functions ***/
@@ -203,6 +207,8 @@ static int lpty__gc(lua_State *L)
 	}
 	if (pty->m_fd > 0) close(pty->m_fd);
 	if (pty->s_fd > 0) close(pty->s_fd);
+	if (pty->e_mfd > 0) close(pty->e_mfd);
+	if (pty->e_sfd > 0) close(pty->e_sfd);
 	return 0;
 }
 
@@ -315,6 +321,37 @@ static double _lpty_gettime(void)
 	return (double)tv.tv_sec + (double)tv.tv_usec / 1000000.0;
 }
 
+/* _lpty_separate_stderr
+ * 
+ * opens or closes the stderr channels for the pty, as desired.
+ * 
+ * Arguments:
+ * 	pty		pty to change stderr channels for
+ *	sepse	0 to close stderr channels, != 0 to open them
+ * 
+ * Returns:
+ * 	1 if all was ok, 0 on error.
+ */
+static int _lpty_separate_stderr(lPty *pty, int sepse)
+{
+	if (sepse && pty->e_mfd == -1) {
+		int fd[2];
+		if (pipe(fd) == 0) {
+			pty->e_mfd = fd[0];
+			pty->e_sfd = fd[1];
+			return 1;
+		}
+		return 0;
+	} else if (!sepse && pty->e_mfd > 0) {
+		close(pty->e_mfd);
+		pty->e_mfd = -1;
+		close(pty->e_sfd);
+		pty->e_sfd = -1;
+		return 1;
+	}
+	return 1;
+}
+
 /* lpty_new
  *
  * create a new lpty object, initialize it, put it into a userdata and
@@ -339,6 +376,7 @@ static int lpty_new(lua_State *L)
 	int usep = 1;	/* use path, default = yes */
 	int nle = 0;	/* no local echo, default = no */
 	int rawm = 0;	/* raw mode, default = no */
+	int sepse = 0;	/* separate stderr, default = no */
 	
 	/* check for options */
 	if (lua_gettop(L) > 0) {
@@ -355,7 +393,9 @@ static int lpty_new(lua_State *L)
 				rawm = lua_toboolean(L, -1);
 			else if (!strcmp(k, "use_path"))
 				usep = lua_toboolean(L, -1);
-			else
+			else if (!strcmp(k, "separate_stderr")) {
+				sepse = lua_toboolean(L, -1);
+			} else
 				return _lpty_error(L, 1, "invalid configuration option: %s", k);
 			
 			lua_pop(L, 1);
@@ -384,6 +424,7 @@ static int lpty_new(lua_State *L)
 		/* cleanup if anything went wrong */
 		if (failed) {
 			close(mfd);
+			mfd = -1;
 		}
 	}
 	if (failed)
@@ -397,6 +438,13 @@ static int lpty_new(lua_State *L)
 	pty->flags.nolocalecho = nle;
 	pty->flags.rawmode = rawm;
 	pty->flags.usepath = usep;
+	pty->e_mfd = -1;
+	pty->e_sfd = -1;
+	/* get original tty flags */
+	tcgetattr(sfd, &pty->otios);
+	
+	if (!_lpty_separate_stderr(pty, sepse))
+		return _lpty_error(L, throwe, "pty initialisation failed: %s", strerror(errno));
 
 	return 1;
 }
@@ -527,17 +575,16 @@ static int _lpty_execvpe(const char *filename, char *const argv[], char *const e
  * turns off local echo for the tty
  * 
  * Arguments:
- * 	tty	the file descriptor of the tty to change settings for
+ * 	pty	the lPty structure for the tty to change settings for
  * 
  * Returns:
  * 	0 on success, -1 on failure
  */
-static int _lpty_tsetnoecho(int tty)
+static int _lpty_tsetnoecho(lPty *pty)
 {
-	struct termios ttys;
-	tcgetattr(tty, &ttys);
+	struct termios ttys = pty->otios;
 	ttys.c_lflag &= ~(ICANON | ECHO);
-	return tcsetattr(tty, TCSANOW, &ttys);
+	return tcsetattr(pty->s_fd, TCSANOW, &ttys);
 }
 
 /* _lpty_tsetraw
@@ -545,22 +592,21 @@ static int _lpty_tsetnoecho(int tty)
  * sets the terminal into raw mode
  * 
  * Arguments:
- * 	tty	the file descriptor of the tty to change settings for
+ * 	pty	the lPty structure for the tty to change settings for
  * 
  * Returns:
  * 	0 on success, -1 on failure
  */
-static int _lpty_tsetraw(int tty)
+static int _lpty_tsetraw(lPty *pty)
 {
-	struct termios ttys;
-	tcgetattr(tty, &ttys);
+	struct termios ttys = pty->otios;
 	ttys.c_iflag &= ~(IGNBRK | BRKINT | PARMRK | ISTRIP
 		| INLCR | IGNCR | ICRNL | IXON);
 	ttys.c_oflag &= ~OPOST;
 	ttys.c_lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
 	ttys.c_cflag &= ~(CSIZE | PARENB);
 	ttys.c_cflag |= CS8;
-	return tcsetattr(tty, TCSANOW, &ttys);
+	return tcsetattr(pty->s_fd, TCSANOW, &ttys);
 }
 
 /* lpty_startproc
@@ -611,23 +657,33 @@ static int lpty_startproc(lua_State *L)
 			
 			/* suppress local echo on slave side if wanted */
 			if (pty->flags.nolocalecho)
-				_lpty_tsetnoecho(ttyfd);
+				_lpty_tsetnoecho(pty);
 
 			/* put terminal into raw mode if wanted */
 			if (pty->flags.rawmode)
-				_lpty_tsetraw(ttyfd);
+				_lpty_tsetraw(pty);
 
 			/* prepare child processes standard file handles */
 			dup2(ttyfd, 0);
 			dup2(ttyfd, 1);
-			dup2(ttyfd, 2);
+			if (pty->e_sfd > 0)
+				dup2(pty->e_sfd, 2);
+			else
+				dup2(ttyfd, 2);
 
 			/* need to create new session id for slave in order for the tty to
 			 * become a controlling tty */
 			if (setsid() < (pid_t)0) {
-				fprintf(stderr, "lpty failed to create new session id.");
+				fprintf(stderr, "error: lpty failed to create new session id.");
 				exit(EXIT_FAILURE);
 				/* we need to terminate here! */
+			}
+
+			/* now make our tty the controlling tty for the new session
+			 */
+			if(ioctl(ttyfd,TIOCSCTTY,1)) {
+				fprintf(stderr, "error: lpty failed to set the controlling tty.");
+				exit(EXIT_FAILURE);
 			}
 
 			/* reset SIGCHLD handler then start our process */
@@ -741,17 +797,17 @@ static int lpty_exitstatus(lua_State *L)
 				int status = _lpty_exitstatus_buffer.ecodes[i].status;
 				if (WIFEXITED(status)) {
 					lua_pushliteral(L, "exit");
-					lua_pushnumber(L, WEXITSTATUS(status));
+					lua_pushinteger(L, WEXITSTATUS(status));
 				} else if (WIFSIGNALED(status)) {
 					lua_pushliteral(L, "sig");
-					lua_pushnumber(L, WTERMSIG(status));
+					lua_pushinteger(L, WTERMSIG(status));
 				}
 				break;
 			}
 		}
 		if (i == EXITSTATUS_BUFSIZ) {
 			lua_pushliteral(L, "unk");
-			lua_pushnumber(L, 0);
+			lua_pushinteger(L, 0);
 		}
 	} else {
 		lua_pushboolean(L, 0);
@@ -841,6 +897,29 @@ static int lpty_getenviron(lua_State *L)
 
 /*** Terminal I/O ***/
 
+/* _lpty_select
+ *
+ * ...
+ */
+static int _lpty_select(int rfd, int wfd, double timeo)
+{
+	fd_set rfds, wfds;
+	struct timeval tv;
+
+	if (rfd < 0 && wfd < 0) return 0;
+	int nfd = rfd > wfd ? rfd : wfd;
+	
+	FD_ZERO(&rfds);
+	FD_ZERO(&wfds);
+	if (rfd > -1) FD_SET(rfd, &rfds);
+	if (wfd > -1) FD_SET(wfd, &wfds);
+
+	tv.tv_sec = (int)timeo;
+	tv.tv_usec = (int)((timeo - tv.tv_sec) * 1000000);
+	
+	return select(nfd + 1, &rfds, &wfds, NULL, &tv);
+}
+
 /* _lpty_waitfordata
  *
  * wait for the master side of a pty to have readable data available or to
@@ -856,19 +935,11 @@ static int lpty_getenviron(lua_State *L)
  */
 static int _lpty_waitfordata(lPty *pty, double timeo, int send)
 {
-	fd_set rfds;
-	struct timeval tv;
 	int ok = -1;
-	
-	FD_ZERO(&rfds);
-	FD_SET(pty->m_fd, &rfds);
-	tv.tv_sec = (int)timeo;
-	tv.tv_usec = (int)((timeo - tv.tv_sec) * 1000000);
-	
 	if (send == 0)
-		ok = select(pty->m_fd + 1, &rfds, NULL, NULL, &tv);
+		ok = _lpty_select(pty->m_fd, -1, timeo);
 	else
-		ok = select(pty->m_fd + 1, NULL, &rfds, NULL, &tv);
+		ok = _lpty_select(-1, pty->m_fd, timeo);
 
 	return ok;
 }
@@ -1054,6 +1125,36 @@ static int lpty_expect(lua_State *L)
 	return lua_gettop(L) - nargs;
 }
 
+/* lpty_readerr
+ *
+ * ...
+ */
+static int lpty_readerr(lua_State *L)
+{
+	lPty *pty = lpty_checkLPty(L, 1);
+	double timeo = (double)luaL_optnumber(L, 2, 0);
+
+	if (pty->e_mfd == -1) {
+		lua_pushnil(L);
+		return 1;
+	}
+
+	int ok = _lpty_select(pty->e_mfd, -1, timeo);
+	if (ok > 0) {
+		char buf[READER_BUFSIZ]; // should probably be more flexible
+		int readn = read(pty->e_mfd, buf, READER_BUFSIZ);
+		if (readn > 0) {
+			lua_pushlstring(L, buf, readn);
+		} else {
+			lua_pushnil(L);
+		}
+	} else {
+		lua_pushnil(L);
+	}
+
+	return 1;
+}
+
 /* lpty_sendok
  *
  * Check wether the master side of this pty can accept data from us
@@ -1149,6 +1250,8 @@ static int lpty_flush(lua_State *L)
 		}
 	}
 	tcflush(pty->m_fd, which);
+	if (which != TCOFLUSH && pty->e_mfd > -1)
+		tcflush(pty->e_mfd, which);
 	
 	return 0;
 }
@@ -1199,6 +1302,17 @@ static int lpty_getfd(lua_State *L)
 	return 1;
 }
 
+/* lpty_geterrfd
+ *
+ * ...
+ */
+static int lpty_geterrfd(lua_State *L)
+{
+	lPty *pty = lpty_checkLPty(L, 1);
+	lua_pushinteger(L, pty->e_mfd);
+	return 1;
+}
+
 /* lpty_getflags
  *
  * Get the creation flags of the pty
@@ -1228,6 +1342,58 @@ static int lpty_getflags(lua_State *L)
 	lua_pushliteral(L, "use_path");
 	lua_pushboolean(L, pty->flags.usepath);
 	lua_rawset(L, -3);
+	lua_pushliteral(L, "separate_stderr");
+	lua_pushboolean(L, pty->e_mfd != -1);
+	lua_rawset(L, -3);
+
+	return 1;
+}
+
+/* lpty_setflag
+ *
+ * change the creation flags of the pty at runtime
+ *
+ * Arguments:
+ *	L	Lua state
+ *
+ * Lua stack:
+ 	1	lpty userdata
+ *
+ * Lua returns:
+ *	+1	a table containing flags and values, as specified for lpty.new()
+ */
+static int lpty_setflag(lua_State *L)
+{
+	lPty *pty = lpty_checkLPty(L, 1);
+	const char* flag = luaL_checkstring(L, 2);
+	int val = lua_toboolean(L, 3);
+	int tty_flags_changed = 0;
+	
+	if (!strcmp(flag, "throw_errors")) {
+		pty->flags.throwerrors = val;
+	} else if (!strcmp(flag, "no_local_echo")) {
+		pty->flags.nolocalecho = val;
+		tty_flags_changed = 1;
+	} else if (!strcmp(flag, "raw_mode")) {
+		pty->flags.rawmode = val;
+		tty_flags_changed = 1;
+	} else if (!strcmp(flag, "use_path")) {
+		pty->flags.usepath = val;
+	} else if (!strcmp(flag, "separate_stderr")) {
+		_lpty_separate_stderr(pty, val);
+	} else {
+		return _lpty_error(L, pty->flags.throwerrors, "unknown flag: %s", flag);
+	}
+	
+	if (tty_flags_changed) {
+		tcsetattr(pty->s_fd, TCSANOW, &pty->otios);
+		if (pty->flags.nolocalecho)
+			_lpty_tsetnoecho(pty);
+		if (pty->flags.rawmode)
+			_lpty_tsetraw(pty);
+	}
+	
+	lua_pushboolean(L, 1);
 	return 1;
 }
 
@@ -1247,11 +1413,14 @@ static const struct luaL_Reg lpty [] ={
 	{"read", lpty_read},
 	{"readline", lpty_readline},
 	{"expect", lpty_expect},
+	{"readerr", lpty_readerr},
 	{"sendok", lpty_sendok},
 	{"send", lpty_send},
 	{"flush", lpty_flush},
 	{"getfd", lpty_getfd},
+	{"geterrfd", lpty_geterrfd},
 	{"getflags", lpty_getflags},
+	{"setflag", lpty_setflag},
 	
 	{NULL, NULL}
 };
