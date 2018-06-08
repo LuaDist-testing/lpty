@@ -27,7 +27,7 @@ extern char** environ;
 #include "lua.h"
 #include "lauxlib.h"
 
-#define LPTY_VERSION "1.2"
+#define LPTY_VERSION "1.2.1"
 
 #define LPTY "lPtyHandler"
 #define TOSTRING_BUFSIZ 64
@@ -914,10 +914,13 @@ static int _lpty_select(int rfd, int wfd, double timeo)
 	if (rfd > -1) FD_SET(rfd, &rfds);
 	if (wfd > -1) FD_SET(wfd, &wfds);
 
-	tv.tv_sec = (int)timeo;
-	tv.tv_usec = (int)((timeo - tv.tv_sec) * 1000000);
+	if (timeo >= 0) {
+		tv.tv_sec = (int)timeo;
+		tv.tv_usec = (int)((timeo - tv.tv_sec) * 1000000);
+		return select(nfd + 1, &rfds, &wfds, NULL, &tv);
+	}
 	
-	return select(nfd + 1, &rfds, &wfds, NULL, &tv);
+	return select(nfd + 1, &rfds, &wfds, NULL, NULL);
 }
 
 /* _lpty_waitfordata
@@ -1034,23 +1037,23 @@ static int lpty_readline(lua_State *L)
 	double timeo = (double)luaL_optnumber(L, 3, -1);
 	char buf[READER_BUFSIZ]; // should probably be more flexible
 	int rd = 0;
+	int readn = 0;
 	int ok = 1, isline = 0;
 	double start = _lpty_gettime();
 	double tmo = timeo;
 
-	if (start < 0)
+	if (start < 0) {
 		return _lpty_error(L, pty->flags.throwerrors, "lpty readline failed: (%d) %s", errno, strerror(errno));
-
-	if (timeo < 0) {
-		tmo = 0;
-		ok = _lpty_waitfordata(pty, (2^32)-1, 0);
 	}
-		
+
 	do {
 		ok = _lpty_waitfordata(pty, tmo, 0);
 			
 		if (ok > 0) {
-			if (read(pty->m_fd, buf + rd, 1) > 0) {
+			/* a read of 0 is not an error, but we may want to give
+			 * control back to the controlling program */
+			readn = read(pty->m_fd, buf + rd, 1);
+			if (readn > 0) {
 				if (buf[rd] == '\n')
 					isline = 1;
 				++rd;
@@ -1080,7 +1083,7 @@ static int lpty_readline(lua_State *L)
 		buf[rd] = 0;
 		lua_pushstring(L, buf);
 	/* we don't consider EINTR and ECHILD errors */
-	} else if (errno && (errno != EINTR) && (errno != ECHILD))
+	} else if ((readn == -1) && errno && (errno != EINTR) && (errno != ECHILD))
 		return _lpty_error(L, pty->flags.throwerrors, "lpty readline failed: (%d) %s", errno, strerror(errno));
 	else
 		lua_pushnil(L);
