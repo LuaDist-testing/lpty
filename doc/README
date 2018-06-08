@@ -33,14 +33,32 @@ Installing
 
    should do the right thing.
 
+   There is also a Makefile in the distribution directory, which has been
+   created for and on Linux, basically for special needs. You will have to
+   edit it by hand, so the luarocks method is preferrable.
+
 Using
 
    require "lpty"
 
   Constructor
 
-   pty = lpty.new()
-          Creates and fully initializes the master side of a pty.
+   pty = lpty.new([{[throw_errors = true|false], [no_local_echo =
+          true|false]}])
+          Creates and fully initializes the master side of a pty. Options
+          for the pty may be passed in a table. These options are:
+
+        throw_errors
+                If true, errors are thrown, otherwise they are returned as
+                a standard (nil, error message) pair. Default is false.
+
+        no_local_echo
+                If true, stuff sent to the parent side of the pty will not
+                be echoed back to the parent side, otherwise it will be
+                echoed back. Default is false.
+
+          If you do not want to pass any options, you may omit the table
+          altogether.
 
   Methods
 
@@ -70,9 +88,11 @@ Using
           returns true if the pty has an active child process, false if
           not (none has been created, the child has terminated, ...)
 
-   pty:readok()
+   pty:readok([timeout])
           returns true if the pty has data available to be read, false
-          otherwise.
+          otherwise. If a timeout value is specified, the call will wait
+          at most that long for data to become available to read. No value
+          is equivalent to a timeout of 0 seconds.
 
    pty:read([timeout])
           reads data from the pty. This is a blocking read, so you can
@@ -81,13 +101,15 @@ Using
           omitted, the read will block until there is something to read.
           Returns the data read, or nil if the request timed out. If an
           error occurred during the read attempt, it is thrown to lua.
-          Note: this reads data output from the client process as well as
-          data sent to the client process from the controlling skript, if
-          that was echoed.
+          Note: unless you specified no_local_echo=true when creating the
+          pty, this reads data output from the client process as well as
+          data sent to the client process from the controlling skript
 
-   pty:sendok()
+   pty:sendok([timeout])
           returns true if the pty can accept data sent to it, false
-          otherwise.
+          otherwise. If a timeout value is specified, the call will wait
+          at most that long for the pty to accept data, No value is
+          equivalent to a timeout of 0 seconds.
 
    pty:send(data [, timeout])
           sends data to the pty. This will then be available to the child
@@ -115,13 +137,14 @@ Additional Info
    to send.
 
    If you have a pty without a running child process, you can only read
-   from it what you write to it. This means that if you (or the last
-   active child process) have nothing written to it, a read with timeout
-   will always time out, and a read without timeout will block. However,
-   if you later start a child process, anything you have written to the
-   pty before that will be available as input to the child. Reading stuff
-   back from the master side of a pty does not remove it from the slave
-   side.
+   from it what you write to it (unless you specified no_local_echo=true
+   for pty creation, in which case you can not read anything from it).
+   This means that if you (or the last active child process) have nothing
+   written to it, a read with timeout will always time out, and a read
+   without timeout will block. However, if you later start a child
+   process, anything you have written to the pty before that will be
+   available as input to the child. Reading stuff back from the master
+   side of a pty does not remove it from the slave side.
 
    The startproc() method can not check whether running the command in the
    child process or basically anything that happens in the child process

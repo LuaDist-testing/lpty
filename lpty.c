@@ -18,6 +18,7 @@
 #include <sys/wait.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <termios.h>
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -31,6 +32,10 @@ typedef struct _lpty_pty {
 	int m_fd;		/* file descriptor for pty master side */
 	int s_fd;		/* file descriptor for pty slave side */
 	pid_t child;	/* pid of process attached to this pty */
+	struct {
+		unsigned int throwerrors :1;
+		unsigned int nolocalecho :1;
+	} flags;
 } lPty;
 
 /*** C level child process related utility functions ***/
@@ -180,6 +185,40 @@ static const luaL_reg lpty_meta[] = {
 	{0, 0}
 };
 
+/* Helper function for error handling: if dothrow is true, throw the error,
+ * otherwise pack it onto the lua stack and return 2
+ * 
+ * Arguments:
+ * 	L	Lua State
+ *	dothrow	1 if the error should be thrown, 0 otherwise
+ *	msg	Error message
+ * 
+ * Returns:
+ * 	2 if the error should be returned to lua, or not at all if it is thrown.
+ * 
+ * Lua Stack:
+ * 	-
+ * 
+ * Lua Returns:
+ * 	+1	nil
+ * 	+2	error messagel
+ */
+static int lpty_error(lua_State *L, int dothrow, char *msg, ...)
+{
+	va_list ap;
+	va_start(ap, msg);
+	char buf[BUFSIZ];
+	vsnprintf(buf, BUFSIZ, msg, ap);
+	
+	if (dothrow)
+		return luaL_error(L, buf);
+	else {
+		lua_pushnil(L);
+		lua_pushstring(L, buf);
+		return 2;
+	}
+}
+
 /* lpty_new
  *
  * create a new lpty object, initialize it, put it into a userdata and
@@ -200,6 +239,21 @@ static int lpty_new(lua_State *L)
 	int mfd = posix_openpt(O_RDWR);
 	int sfd = -1;
 	int failed = (mfd < 0);
+	int throwe = 0;	/* throw errors, default = no */
+	int nle = 0;	/* no local echo, default 0 */
+	
+	/* check for options */
+	if (lua_gettop(L) > 0) {
+		luaL_checktype(L, 1, LUA_TTABLE);
+		lua_pushstring(L, "throw_errors");
+		lua_rawget(L, 1);
+		throwe = lua_toboolean(L, 2);
+		lua_pop(L, 1);
+		lua_pushstring(L, "no_local_echo");
+		lua_rawget(L, 1);
+		nle = lua_toboolean(L, 2);
+		lua_pop(L, 1);
+	}
 	
 	if (mfd > 0) {
 		/* setup parent side of pty. BEWARE:
@@ -226,12 +280,23 @@ static int lpty_new(lua_State *L)
 		}
 	}
 	if (failed)
-		return luaL_error(L, "pty initialisation failed: %s", strerror(errno));
+		return lpty_error(L, throwe, "pty initialisation failed: %s", strerror(errno));
+
+	/* suppress local echo on slave side if wanted */
+	if (nle) {
+		struct termios ttys;
+
+		tcgetattr( sfd, &ttys );
+		ttys.c_lflag &= ~( ECHO );
+		tcsetattr( sfd, TCSAFLUSH, &ttys );
+	}
 	
 	lPty *pty = lpty_pushLPty(L);
 	pty->m_fd = mfd;
 	pty->s_fd = sfd;
 	pty->child = -1;
+	pty->flags.nolocalecho = nle;
+	pty->flags.throwerrors = throwe;
 
 	return 1;
 }
@@ -283,7 +348,7 @@ static int lpty_startproc(lua_State *L)
 			for (i = 1; i < nargs; ++i)
 				args[i] = lua_tostring(L, 2 + i);
 			args[nargs] = NULL;
-
+			
 			/* prepare child processes standard file handles */
 			dup2(ttyfd, 0);
 			dup2(ttyfd, 1);
@@ -291,8 +356,11 @@ static int lpty_startproc(lua_State *L)
 
 			/* need to create new session id for slave in order for the tty to
 			 * become a controlling tty */
-			if (setsid() < (pid_t)0)
-				return luaL_error(L, "lpty failed to create new session id.");
+			if (setsid() < (pid_t)0) {
+				fprintf(stderr, "lpty failed to create new session id.");
+				exit(EXIT_FAILURE);
+				/* we need to terminate here! */
+			}
 
 			/* reset SIGCHLD handler then start our process */
 			signal(SIGCHLD, SIG_DFL);
@@ -304,12 +372,13 @@ static int lpty_startproc(lua_State *L)
 			free(args);
 			fprintf(stderr, "error: lpty failed to start child process: %s", strerror(errno));
 			exit(EXIT_FAILURE);
+			/* we need to terminate here! */
 		} else if (child > 0) {
 			/* parent process: clean up, store child pid, return success */
 			pty->child = child;
 			lua_pushboolean(L, 1);
 		} else {
-			return luaL_error(L, "lpty failed to create child process: %s", strerror(errno));
+			return lpty_error(L, pty->flags.throwerrors, "lpty failed to create child process: %s", strerror(errno));
 		}
 	} 
 	return 1;
@@ -416,6 +485,7 @@ static int _lpty_waitfordata(lPty *pty, double timeo, int send)
  *
  * Lua Stack:
  *	1	lpty userdata
+ * 	2	(optional) timeout in seconds
  *
  * Lua Returns:
  *	+1	true if there is data available to read, false if not.
@@ -423,8 +493,9 @@ static int _lpty_waitfordata(lPty *pty, double timeo, int send)
 static int lpty_readok(lua_State *L)
 {
 	lPty *pty = lpty_checkLPty(L, 1);
+	double timeo = (double)luaL_optnumber(L, 2, 0);
 	
-	int ok = _lpty_waitfordata(pty, 0, 0);
+	int ok = _lpty_waitfordata(pty, timeo, 0);
 	lua_pushboolean(L, ok > 0);
 	return 1;
 }
@@ -464,7 +535,7 @@ static int lpty_read(lua_State *L)
 		lua_pushstring(L, buf);
 	/* we don't consider EINTR and ECHILD errors */
 	} else if (errno && (errno != EINTR) && (errno != ECHILD))
-		return luaL_error(L, "lpty read failed: (%d) %s", errno, strerror(errno));
+		return lpty_error(L, pty->flags.throwerrors, "lpty read failed: (%d) %s", errno, strerror(errno));
 	else
 		lua_pushnil(L);
 	return 1;
@@ -479,6 +550,7 @@ static int lpty_read(lua_State *L)
  *
  * Lua Stack:
  *	1	lpty userdata
+ * 	2	(optional) timeout in seconds
  *
  * Lua Returns:
  *	+1	true if pty can accept data, false if not.
@@ -486,8 +558,9 @@ static int lpty_read(lua_State *L)
 static int lpty_sendok(lua_State *L)
 {
 	lPty *pty = lpty_checkLPty(L, 1);
-	
-	int ok = _lpty_waitfordata(pty, 0, 1);
+	double timeo = (double)luaL_optnumber(L, 2, 0);
+
+	int ok = _lpty_waitfordata(pty, timeo, 1);
 	lua_pushboolean(L, ok > 0);
 	return 1;
 }
@@ -523,7 +596,7 @@ static int lpty_send(lua_State *L)
 	if (written >= 0)
 		lua_pushinteger(L, written);
 	else if (errno && (errno != EINTR))
-		return luaL_error(L, "lpty send failed: %s", strerror(errno));
+		return lpty_error(L, pty->flags.throwerrors, "lpty send failed: (%d) %s", errno, strerror(errno));
 	else
 		lua_pushnil(L);
 	return 1;
@@ -551,7 +624,7 @@ static int lpty_ttyname(lua_State *L)
 	if (name)
 		lua_pushstring(L, name);
 	else
-		luaL_error(L, "lpty could not fetch slave tty name: %s", strerror(errno));
+		return lpty_error(L, pty->flags.throwerrors, "lpty could not fetch slave tty name: %s", strerror(errno));
 	return 1;
 }
 

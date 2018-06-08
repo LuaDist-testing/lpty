@@ -135,7 +135,7 @@ else
 end
 
 -- 11
-announce("checking wheter we can read from pty, should return false")
+announce("checking whether we can read from pty, should return false")
 ok, val = pcall(lpty.readok, p)
 if ok then
 	check(val == false)
@@ -152,7 +152,7 @@ else
 	fail(tostring(val))
 end
 
--- test timeut length. In order for this to work there may be no pending data in the pty to read.
+-- test timeout length. In order for this to work there may be no pending data in the pty to read.
 function testto(to, tm)
 	local t0 = os.time()
 	local i
@@ -168,13 +168,73 @@ end
 announce("testing timeout 1 second by running r:read(1) 10 times should take about 10 seconds")
 check(testto(1, 10))
 
--- 13
+-- 14
 announce("testing timeout 0.5 second by running r:read(1) 10 times should take about 5 seconds")
 check(testto(0.5, 5))
 
--- 13
+-- 15
 announce("testing timeout 1.5 second by running r:read(1) 10 times should take about 15 seconds")
 check(testto(1.5, 15))
+
+-- creating pty with no local echo for remaining tests
+pn = lpty.new { no_local_echo = true }
+
+-- 16
+announce("checking for data from no_local_echo pty, should return false")
+ok, val = pcall(lpty.readok, pn)
+if ok then
+	check(val == false)
+else
+	fail(tostring(val))
+end
+
+-- 17
+announce("sending data to no_local_echo pty then checking for data, should return false")
+ok, val = pcall(lpty.send, pn, "abc\n")
+if not ok then
+	fail(tostring(val))
+else
+	ok, val = pcall(lpty.readok, pn)
+	if ok then
+		check(val == false)
+	else
+		fail(tostring(val))
+	end
+end
+
+-- 18
+announce("starting test client for no_local_echo pty")
+ok, val = pcall(lpty.startproc, pn, "lua", "testclient.lua")
+if ok then
+	check(val)
+else
+	fail(tostring(val))
+end
+
+-- 19
+announce("reading from no_local_echo pty, should now return '+abc+\\n'")
+ok, val = pcall(lpty.read, pn)
+if ok then
+	val = string.gsub(val, "[\r\n]+", '.') -- normalize line endings
+	check(val == "+abc+.")
+else
+	fail(tostring(val))
+end
+
+-- 20
+announce("sending 'xxx\\n' to pty, reading back, should return '+xxx+\\n'")
+ok, val = pcall(lpty.send, pn, "xxx\n")
+if not ok then
+	fail(tostring(val))
+else
+	ok, val = pcall(lpty.read, pn)
+	if ok then
+		val = string.gsub(val, "[\r\n]+", '.') -- normalize line endings
+		check(val == "+xxx+.")
+	else
+		fail(tostring(val))
+	end
+end
 
 -- all done
 print("Tests " .. tostring(ntests) .. " failed " .. tostring(nfailed))
