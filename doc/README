@@ -1,0 +1,150 @@
+                                     README
+
+lpty
+
+   A package that provides a simple interface to start programs and
+   control them via a pty for Lua.
+
+   Author: Gunnar Zötl , 2010.
+   Released under MIT/X11 license. See file LICENSE for details.
+
+Introduction
+
+   This is a simple interface to pty functionality, providing the ability
+   to fork a process and run it under pty control. It does not try to
+   mimic the posix API but instead focuses on the function of running and
+   controlling a program. The interface is very bare bones, no additional
+   functionality is provided, especially nothing like expect, which should
+   be a different package.
+
+   This has been developed on Linux and tested on MacOS X. It should
+   compile and run on any platform supporting the Unix 98 interface to
+   pty's. Support for additional Unixen might follow in the future,
+   depending on demand (especially my own ;) ). No support for windows is
+   planned, as ptys are a Unix thing. It might work with cygwin.
+
+Installing
+
+   This uses only stuff that comes with your system. Normally, calling
+   sudo luarocks install lpty
+
+   or when you have an unpacked source folder,
+   sudo luarocks make
+
+   should do the right thing.
+
+Using
+
+   require "lpty"
+
+  Constructor
+
+   pty = lpty.new()
+          Creates and fully initializes the master side of a pty.
+
+  Methods
+
+   pty:startproc("command", "arg1", "arg2", ...)
+          Starts a process with the slave side of the pty as its
+          controlling terminal. The child processes stdin, stdout and
+          stderr are set to use the slave side of th pty. Command and its
+          arguments must be separate arguments to the startproc method.
+          This uses the PATH environment variable to find any executables,
+          so specifying a ful path to the command is not always necessary.
+          Returns true if the fork() was successful, false if there is
+          already an active process attached to the pty, and throws an
+          error if anything goes wrong.
+
+   pty:endproc([kill])
+          Terminates the process running with the pty as its controlling
+          terminal. If the optional parameter kill is false or omitted,
+          send the child process a SIGTERM, otherwise send a SIGKILL. It
+          is not an error to call this on a pty object that has no active
+          child processes. You do not need to call it when you have
+          already terminated the child process using more civilized means
+          (like, for example, sending it a quit command it understands).
+          After the child process has been terminated, a new one can be
+          started using the same PTY.
+
+   pty:hasproc()
+          returns true if the pty has an active child process, false if
+          not (none has been created, the child has terminated, ...)
+
+   pty:readok()
+          returns true if the pty has data available to be read, false
+          otherwise.
+
+   pty:read([timeout])
+          reads data from the pty. This is a blocking read, so you can
+          specify an optional timeout after which the read should return
+          to the caller whether there was data or not. If the timeout is
+          omitted, the read will block until there is something to read.
+          Returns the data read, or nil if the request timed out. If an
+          error occurred during the read attempt, it is thrown to lua.
+          Note: this reads data output from the client process as well as
+          data sent to the client process from the controlling skript, if
+          that was echoed.
+
+   pty:sendok()
+          returns true if the pty can accept data sent to it, false
+          otherwise.
+
+   pty:send(data [, timeout])
+          sends data to the pty. This will then be available to the child
+          process on its stdin. Sending data may block, there is an
+          optional argument for a timeout on the send operation. If the
+          timeout argument is omitted, the send operation will block until
+          the pty can accept the data. Returns the number of bytes
+          written, or nil if the send timed out. If an error occurred
+          during the attempt to write it is thrown to lua.
+
+Additional Info
+
+   the read() method reads its data ito a buffer. The size of this buffer
+   determines how much data can be returned from an individual read. It is
+   set by a #define at the start of the module source and by default is
+   set to 4096. Considering the C-typical terminating zero, this will
+   leave a maximum of 4095 bytes to be read in one go. In order to fetch
+   all available data, just loop while pty:readok() and concatenate the
+   results.
+
+   Similar things hold for send(). It may not send all data you gave it in
+   one go. For small amounts of data this is quite improbable, but in
+   industrial strength applications you should probably check the return
+   value of the send() method against the length of the data you intended
+   to send.
+
+   The startproc() method can not check whether running the command in the
+   child process or basically anything that happens in the child process
+   after the fork is successful. If startproc() returns true, this means
+   that setting up the client side of the tty and fork()ing went well and
+   yielded a running child process. You may want to check wether it is
+   still running when you need it using the hasproc() method, especially
+   if you're dealing with an interactive program. If the program the child
+   was supposed to start is not running when you expect it to, you will
+   have to check the contents of the pty for the reason.
+
+   When a lpty object is garbage collected, its master side pty handle is
+   closed, and if it as a child process, that is terminated with a
+   SIGKILL. So it is reasonably safe to let pty's with active processes
+   become garbage, it just isn't very friendly towards the child
+   processes.
+
+Example
+
+   See the samples folder in the distribution archive.
+
+References
+
+   Read up on ptys on your local friendly linux system: man 7 pty and
+   friends. This is linux specific, but as I use Unix 98 pseudo ttys, this
+   holds whereever they're available.
+
+Known Issues
+
+   There are two warnings when building this stuff on linux. The manpage
+   sais, when you #define _XOPEN_SOURCE and then #include <stdlib.h>, then
+   ptsname is declared as char *ptsname(int). So I #defined, #included,
+   and get a warning that an int is converted to a pointer when using
+   ptsname(). It works nonetheless, but I'd rather not have that
+   warning... anybody knows what I'm doing wrong there?
