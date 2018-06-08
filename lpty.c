@@ -6,10 +6,7 @@
  * Released under MIT/X11 license. See file LICENSE for details.
  */
 
-#include "lua.h"
-#include "lauxlib.h"
-
-#define _XOPEN_SOURCE
+#define _XOPEN_SOURCE 600
 
 #include <stdlib.h>
 #include <unistd.h>
@@ -21,6 +18,9 @@
 #include <sys/wait.h>
 #include <sys/select.h>
 #include <sys/time.h>
+
+#include "lua.h"
+#include "lauxlib.h"
 
 #define LPTY "lPtyHandler"
 #define TOSTRING_BUFSIZ 64
@@ -336,17 +336,17 @@ static int lpty_endproc(lua_State *L)
 {
 	lPty *pty = lpty_checkLPty(L, 1);
 	int sigkill = 0;
-	int done = 0;
 	if (lua_gettop(L) > 1) {
 		luaL_checktype(L, 2, LUA_TBOOLEAN);
 		sigkill = lua_toboolean(L, 2);
 	}
 
-	if (_lpty_hasrunningchild(pty))
+	if (_lpty_hasrunningchild(pty)) {
 		if (sigkill)
 			kill(pty->child, SIGKILL);
 		else
 			kill(pty->child, SIGTERM);
+	}
 	pty->child = -1;
 	
 	return 0;

@@ -114,6 +114,15 @@ Additional Info
    value of the send() method against the length of the data you intended
    to send.
 
+   If you have a pty without a running child process, you can only read
+   from it what you write to it. This means that if you (or the last
+   active child process) have nothing written to it, a read with timeout
+   will always time out, and a read without timeout will block. However,
+   if you later start a child process, anything you have written to the
+   pty before that will be available as input to the child. Reading stuff
+   back from the master side of a pty does not remove it from the slave
+   side.
+
    The startproc() method can not check whether running the command in the
    child process or basically anything that happens in the child process
    after the fork is successful. If startproc() returns true, this means
@@ -139,12 +148,3 @@ References
    Read up on ptys on your local friendly linux system: man 7 pty and
    friends. This is linux specific, but as I use Unix 98 pseudo ttys, this
    holds whereever they're available.
-
-Known Issues
-
-   There are two warnings when building this stuff on linux. The manpage
-   sais, when you #define _XOPEN_SOURCE and then #include <stdlib.h>, then
-   ptsname is declared as char *ptsname(int). So I #defined, #included,
-   and get a warning that an int is converted to a pointer when using
-   ptsname(). It works nonetheless, but I'd rather not have that
-   warning... anybody knows what I'm doing wrong there?
