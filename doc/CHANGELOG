@@ -1,5 +1,18 @@
 # CHANGELOG #
 
+## Version 1.2.2 ##
+
+* proper tostring method
+* added va_end() in _lpty_error
+* fixed 2 potential memory leaks where the result of realloc was ignored
+* fixed memory leak in _lpty_execvpe
+* added checks for first argument in lpty_[gs]etenviron
+
+## Version 1.2.1 ##
+
+* fixed a bug where lpty:readline() could have returned an error if the read from the pty just returned 0. Bug discovered and fix provided by Robert Kumpulainen robrnen@gmail.com
+* small change to timeout handling
+
 ## Version 1.2 ##
 
 * verified lua 5.3 compatibility

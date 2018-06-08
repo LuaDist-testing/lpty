@@ -1,15 +1,15 @@
 -- This file was automatically generated for the LuaDist project.
 
 package = "lpty"
-version = "1.2.1-1"
+version = "1.2.2-1"
 -- LuaDist source
 source = {
-  tag = "1.2.1-1",
+  tag = "1.2.2-1",
   url = "git://github.com/LuaDist-testing/lpty.git"
 }
 -- Original source
 -- source = {
--- 	url = "http://www.tset.de/downloads/lpty-1.2.1-1.tar.gz"
+-- 	url = "http://www.tset.de/downloads/lpty-1.2.2-1.tar.gz"
 -- }
 description = {
 	summary = "A simple facility for lua to control other programs via PTYs.",

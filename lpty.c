@@ -226,13 +226,7 @@ static int lpty__gc(lua_State *L)
 static int lpty__toString(lua_State *L)
 {
 	lPty *pty = lpty_checkLPty(L, 1);
-	char buf[TOSTRING_BUFSIZ];
-	/* length of type name + length of hex pointer rep + '0x' + ' ()' + '\0' */
-	if (strlen(LPTY) + (sizeof(void*) * 2) + 2 + 4 > TOSTRING_BUFSIZ)
-		return luaL_error(L, "Whoopsie... the string representation seems to be too long.");
-		/* this should not happen, just to be sure! */
-	sprintf(buf, "%s (%p)", LPTY, pty);
-	lua_pushstring(L, buf);
+	lua_pushfstring(L, "%s: %p", LPTY, pty);
 	return 1;
 }
 
@@ -270,7 +264,8 @@ static int _lpty_error(lua_State *L, int dothrow, const char *msg, ...)
 	va_start(ap, msg);
 	char buf[BUFSIZ];
 	vsnprintf(buf, BUFSIZ, msg, ap);
-	
+	va_end(ap);
+
 	if (dothrow)
 		return luaL_error(L, buf);
 	else {
@@ -451,6 +446,8 @@ static int lpty_new(lua_State *L)
 
 /*** Process handling ***/
 
+static void _lpty_freeenv(char **env);
+
 /* _lpty_makeenv
  * 
  * create an environment usable with execve() from the lpty-userdatas stored
@@ -486,9 +483,16 @@ static char **_lpty_makeenv(lua_State *L)
 				c = malloc(strlen(k) + 1 + strlen(v) + 1);
 				sprintf(c, "%s=%s", k, v);
 				env[n++] = c;
-				if (n >= nenv + 1) {
+				if (n >= nenv - 1) {
 					nenv = nenv * 2;
-					env = realloc(env, nenv * sizeof(char*));
+					char **newenv = realloc(env, nenv * sizeof(char*));
+					if (newenv) {
+						env = newenv;
+					} else {
+						env[n] = NULL;
+						_lpty_freeenv(env);
+						/* return */ luaL_error(L, "out of memory");
+					}
 				}
 			}
 			lua_pop(L, 1); /* value */
@@ -564,6 +568,7 @@ static int _lpty_execvpe(const char *filename, char *const argv[], char *const e
 		if (errno == EACCES) e = errno;
 
 		/* if we got here, execve() failed for all alternatives. */
+		free(path);
 		free(pbuf);
 		errno = e;
 		return -1;
@@ -833,7 +838,7 @@ static int lpty_exitstatus(lua_State *L)
  */
 static int lpty_getenviron(lua_State *L)
 {
-	/* lPty *pty = lpty_checkLPty(L, 1); */
+	(void) lpty_checkLPty(L, 1);
 	char *c = NULL, **e = environ, *p;
 	size_t buflen = 64;
 	char *buf = malloc(buflen);
@@ -848,7 +853,13 @@ static int lpty_getenviron(lua_State *L)
 		while ((c = *e++)) {
 			if (strlen(c) >= buflen) {
 				buflen += strlen(c);
-				buf = realloc(buf, buflen);
+				char *newbuf = realloc(buf, buflen);
+				if (newbuf) {
+					buf = newbuf;
+				} else {
+					free(buf);
+					return luaL_error(L, "out of memory");
+				}
 			}
 			strcpy(buf, c);
 			p = strchr(buf, '=');
@@ -881,7 +892,7 @@ static int lpty_getenviron(lua_State *L)
  */
  static int lpty_setenviron(lua_State *L)
 {
-	/* lPty *pty = lpty_checkLPty(L, 1); */
+	(void) lpty_checkLPty(L, 1);
 
 	if (!lua_isnil(L, 2) && !lua_istable(L, 2))
 		luaL_argerror(L, 2, "must be table or nil");
