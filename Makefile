@@ -24,6 +24,7 @@ LUA_INST_ROOT=$(INSTALL_ROOT)/share/lua/$(LUAVERSION)
 
 # OS specialities
 ifeq ($(OS),Darwin)
+CC = cc
 LDFLAGS = -bundle -undefined dynamic_lookup -all_load
 endif
 

@@ -2,7 +2,7 @@
  *
  * provide simple pty interface for lua
  *
- * Gunnar Zötl <gz@tset.de>, 2010, 2011
+ * Gunnar Zötl <gz@tset.de>, 2010-2013
  * Released under MIT/X11 license. See file LICENSE for details.
  */
 
@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <string.h>
 #include <errno.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/select.h>
@@ -24,6 +25,8 @@ extern char** environ;
 
 #include "lua.h"
 #include "lauxlib.h"
+
+#define LPTY_VERSION "1.0.1"
 
 #define LPTY "lPtyHandler"
 #define TOSTRING_BUFSIZ 64
@@ -60,6 +63,17 @@ static struct {
 	struct { pid_t child; int status; } ecodes[EXITSTATUS_BUFSIZ];
 } _lpty_exitstatus_buffer;
 
+/* helper function to set SIGCHLD handler
+ */
+static int _lpty_set_sigchld_handler(void (*handler)(int))
+{
+	struct sigaction sa;
+	sa.sa_handler = handler;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
+	return sigaction(SIGCHLD, &sa, NULL);
+}
+
 /* signal handler for SIGCHLD
  * doesn't do much, just collect all child processes that have died.
  */
@@ -82,7 +96,7 @@ static void _lpty_sigchld_handler(int sig)
  */
 static void _lpty_sigchld_handlerexit_cleanup(void)
 {
-	signal(SIGCHLD, SIG_DFL);
+	_lpty_set_sigchld_handler(SIG_DFL);
 }
 
 /* _lpty_hasrunningchild
@@ -326,9 +340,10 @@ static int lpty_new(lua_State *L)
 	if (mfd > 0) {
 		/* setup parent side of pty. BEWARE:
 		 * behaviour of grantpt is undefined if a SIGCHLD handler is active */
-		void * ochldhandler = signal(SIGCHLD, SIG_DFL);
+		struct sigaction oldhandler;
+		_lpty_set_sigchld_handler(SIG_DFL);
 		failed = grantpt(mfd);
-		signal(SIGCHLD, ochldhandler);
+		_lpty_set_sigchld_handler(_lpty_sigchld_handler);
 
 		failed = failed || unlockpt(mfd);
 
@@ -514,7 +529,7 @@ static int lpty_startproc(lua_State *L)
 		pid_t child;
 		int ttyfd = pty->s_fd;
 
-		signal(SIGCHLD, _lpty_sigchld_handler);
+		_lpty_set_sigchld_handler(_lpty_sigchld_handler);
 
 		/* now start child process */
 		child = fork();
@@ -534,7 +549,7 @@ static int lpty_startproc(lua_State *L)
 				struct termios ttys;
 
 				tcgetattr(ttyfd, &ttys);
-				ttys.c_lflag &= ~(ECHO);
+				ttys.c_lflag &= ~(ECHO | ICANON);
 				tcsetattr(ttyfd, TCSANOW, &ttys);
 			}
 
@@ -552,8 +567,8 @@ static int lpty_startproc(lua_State *L)
 			}
 
 			/* reset SIGCHLD handler then start our process */
-			signal(SIGCHLD, SIG_DFL);
-			
+			_lpty_set_sigchld_handler(SIG_DFL);
+
 			char **e = _lpty_makeenv(L);
 			if (pty->flags.usepath)
 				_lpty_execvpe(cmd, (char* const*)args, e ? e : environ);
@@ -986,6 +1001,26 @@ static int lpty_ttyname(lua_State *L)
 	return 1;
 }
 
+/* lpty_getfd
+ *
+ * Get the fd of the master side of the pty
+ *
+ * Arguments:
+ *	L	Lua state
+ *
+ * Lua stack:
+ 	1	lpty userdata
+ *
+ * Lua returns:
+ *	+1	The master fd (number) of the pty
+ */
+static int lpty_getfd(lua_State *L)
+{
+	lPty *pty = lpty_checkLPty(L, 1);
+	lua_pushinteger(L, pty->m_fd);
+	return 1;
+}
+
 /* Function list / object metatable
  */
 static const struct luaL_Reg lpty [] ={
@@ -1002,6 +1037,7 @@ static const struct luaL_Reg lpty [] ={
 	{"sendok", lpty_sendok},
 	{"send", lpty_send},
 	{"flush", lpty_flush},
+	{"getfd", lpty_getfd},
 	
 	{NULL, NULL}
 };
@@ -1021,6 +1057,10 @@ int luaopen_lpty(lua_State *L)
 	_lpty_exitstatus_buffer.cur = 0;
 
 	luaL_newlib(L, lpty);
+
+	lua_pushliteral(L, "_VERSION");
+	lua_pushliteral(L, LPTY_VERSION);
+	lua_rawset(L, -3);
 
 	/* add lPty userdata metatable */
 	luaL_newmetatable(L, LPTY);
