@@ -2,7 +2,7 @@
  *
  * provide simple pty interface for lua
  *
- * Gunnar Zötl <gz@tset.de>, 2010
+ * Gunnar Zötl <gz@tset.de>, 2010, 2011
  * Released under MIT/X11 license. See file LICENSE for details.
  */
 
@@ -20,12 +20,24 @@
 #include <sys/time.h>
 #include <termios.h>
 
+extern char** environ;
+
 #include "lua.h"
 #include "lauxlib.h"
 
 #define LPTY "lPtyHandler"
 #define TOSTRING_BUFSIZ 64
 #define READER_BUFSIZ 4096
+#define EXITSTATUS_BUFSIZ 16
+
+#if LUA_VERSION_NUM == 501
+#define luaL_newlib(L,funcs) lua_newtable(L); luaL_register(L, NULL, funcs)
+#define luaL_setfuncs(L,funcs,x) luaL_register(L, NULL, funcs)
+/* I realize these do not behave quite the same, but for the purposes of
+ * this module this will do */
+#define lua_setuservalue(L, idx) lua_setfenv(L, idx)
+#define lua_getuservalue(L, idx) lua_getfenv(L, idx)
+#endif
 
 /* structure for pty userdata */
 typedef struct _lpty_pty {
@@ -35,10 +47,18 @@ typedef struct _lpty_pty {
 	struct {
 		unsigned int throwerrors :1;
 		unsigned int nolocalecho :1;
+		unsigned int usepath :1;
 	} flags;
 } lPty;
 
 /*** C level child process related utility functions ***/
+
+/* structure to cache caught exit stati in. Not very pretty... but works.
+ */
+static struct {
+	int cur;
+	struct { pid_t child; int status; } ecodes[EXITSTATUS_BUFSIZ];
+} _lpty_exitstatus_buffer;
 
 /* signal handler for SIGCHLD
  * doesn't do much, just collect all child processes that have died.
@@ -46,9 +66,23 @@ typedef struct _lpty_pty {
 static void _lpty_sigchld_handler(int sig)
 {
 	pid_t child;
+	int status;
 	/* WNOHANG because this might occur for a child that has already been 
 	 * finalized (most probably with __gc) */
-	while ((child = waitpid(-1, NULL, WNOHANG)) > 0) {}
+	while ((child = waitpid(-1, &status, WNOHANG)) > 0) {
+		_lpty_exitstatus_buffer.ecodes[_lpty_exitstatus_buffer.cur].child = child;
+		_lpty_exitstatus_buffer.ecodes[_lpty_exitstatus_buffer.cur].status = status;
+		_lpty_exitstatus_buffer.cur = (_lpty_exitstatus_buffer.cur + 1) % EXITSTATUS_BUFSIZ;
+	}
+}
+
+/* cleanup function to be called at program exit. SIGCHLD signals may arrive
+ * after this shared library has been unmapped, which will result in a segmentation
+ * fault! So we reset the signal handler on exit, and all is well.
+ */
+static void _lpty_sigchld_handlerexit_cleanup(void)
+{
+	signal(SIGCHLD, SIG_DFL);
 }
 
 /* _lpty_hasrunningchild
@@ -118,6 +152,8 @@ static lPty* lpty_pushLPty(lua_State *L)
 	lPty *pty = (lPty*) lua_newuserdata(L, sizeof(lPty));
 	luaL_getmetatable(L, LPTY);
 	lua_setmetatable(L, -2);
+	lua_newtable(L);
+	lua_setuservalue(L, -2);
 	return pty;
 }
 
@@ -146,6 +182,7 @@ static int lpty__gc(lua_State *L)
 	if (_lpty_hasrunningchild(pty)) {
 		/* no need to be gentle, this process has been abandoned. */
 		kill(pty->child, SIGKILL);
+		/* also, no need to collect exit status, as the controlling object ist just being collected */
 		waitpid(pty->child, NULL, WNOHANG);
 	}
 	if (pty->m_fd > 0) close(pty->m_fd);
@@ -179,13 +216,15 @@ static int lpty__toString(lua_State *L)
 
 /* metamethods for the pty userdata
  */
-static const luaL_reg lpty_meta[] = {
+static const luaL_Reg lpty_meta[] = {
 	{"__gc", lpty__gc},
 	{"__tostring", lpty__toString},
 	{0, 0}
 };
 
-/* Helper function for error handling: if dothrow is true, throw the error,
+/* _lpty_error
+ * 
+ * Helper function for error handling: if dothrow is true, throw the error,
  * otherwise pack it onto the lua stack and return 2
  * 
  * Arguments:
@@ -203,7 +242,7 @@ static const luaL_reg lpty_meta[] = {
  * 	+1	nil
  * 	+2	error messagel
  */
-static int lpty_error(lua_State *L, int dothrow, char *msg, ...)
+static int _lpty_error(lua_State *L, int dothrow, char *msg, ...)
 {
 	va_list ap;
 	va_start(ap, msg);
@@ -217,6 +256,28 @@ static int lpty_error(lua_State *L, int dothrow, char *msg, ...)
 		lua_pushstring(L, buf);
 		return 2;
 	}
+}
+
+/* _lpty_optboolean
+ * 
+ * helper for optional boolean options, when nil is found on the stack,
+ * the default value is returned.
+ * 
+ * Arguments:
+ * 	L	Lua State
+ * 	idx	index on the stack where the value is to be found
+ *	dfl	default value for when the value it index idx on the stack is nil
+ * 
+ * Returns:
+ * 	either the value on the stack, converted to a truth value, or the
+ * 	default value, if there was nil on the stack.
+ */
+static int _lpty_optboolean(lua_State *L, int idx, int dfl)
+{
+	if (lua_isnil(L, idx))
+		return dfl;
+	else
+		return lua_toboolean(L, idx);
 }
 
 /* lpty_new
@@ -240,6 +301,7 @@ static int lpty_new(lua_State *L)
 	int sfd = -1;
 	int failed = (mfd < 0);
 	int throwe = 0;	/* throw errors, default = no */
+	int usep = 1;	/* use path, default = yes */
 	int nle = 0;	/* no local echo, default 0 */
 	
 	/* check for options */
@@ -247,11 +309,17 @@ static int lpty_new(lua_State *L)
 		luaL_checktype(L, 1, LUA_TTABLE);
 		lua_pushstring(L, "throw_errors");
 		lua_rawget(L, 1);
-		throwe = lua_toboolean(L, 2);
+		throwe = _lpty_optboolean(L, 2, throwe);
 		lua_pop(L, 1);
+		
 		lua_pushstring(L, "no_local_echo");
 		lua_rawget(L, 1);
-		nle = lua_toboolean(L, 2);
+		nle = _lpty_optboolean(L, 2, nle);
+		lua_pop(L, 1);
+		
+		lua_pushstring(L, "use_path");
+		lua_rawget(L, 1);
+		usep = _lpty_optboolean(L, 2, usep);
 		lua_pop(L, 1);
 	}
 	
@@ -280,28 +348,140 @@ static int lpty_new(lua_State *L)
 		}
 	}
 	if (failed)
-		return lpty_error(L, throwe, "pty initialisation failed: %s", strerror(errno));
+		return _lpty_error(L, throwe, "pty initialisation failed: %s", strerror(errno));
 
-	/* suppress local echo on slave side if wanted */
-	if (nle) {
-		struct termios ttys;
-
-		tcgetattr( sfd, &ttys );
-		ttys.c_lflag &= ~( ECHO );
-		tcsetattr( sfd, TCSAFLUSH, &ttys );
-	}
-	
 	lPty *pty = lpty_pushLPty(L);
 	pty->m_fd = mfd;
 	pty->s_fd = sfd;
 	pty->child = -1;
 	pty->flags.nolocalecho = nle;
 	pty->flags.throwerrors = throwe;
+	pty->flags.usepath = usep;
 
 	return 1;
 }
 
 /*** Process handling ***/
+
+/* _lpty_makeenv
+ * 
+ * create an environment usable with execve() from the lpty-userdatas stored
+ * custom environment. Returns NULL if no special environment is requested.
+ * 
+ * Arguments:
+ * 	L	lua State
+ * 
+ * Returns:
+ * 	an array of strings containing "name=value" pairs, just like environ
+ */
+static char **_lpty_makeenv(lua_State *L)
+{
+	int nenv = 16;
+	char **env = NULL;
+	lua_getuservalue(L, 1);
+	lua_rawgeti(L, -1, 1);
+	lua_remove(L, -2);
+
+	if (lua_isnil(L, -1)) {
+		lua_pop(L, 1);
+	} else {
+		const char *k, *v;
+		char *c;
+		int n = 0;
+		env = calloc(nenv, sizeof(char*));
+		lua_pushnil(L);
+		while (lua_next(L, -2) != 0) {
+			/* we only care for the things with "real" names */
+			if (lua_type(L, -2) == LUA_TSTRING) {
+				k = lua_tostring(L, -2);
+				v = lua_tostring(L, -1);
+				c = malloc(strlen(k) + 1 + strlen(v) + 1);
+				sprintf(c, "%s=%s", k, v);
+				env[n++] = c;
+				if (n >= nenv + 1) {
+					nenv = nenv * 2;
+					env = realloc(env, nenv * sizeof(char*));
+				}
+			}
+			lua_pop(L, 1); /* value */
+		}
+		env[n] = NULL;
+		lua_pop(L, 2); /* key and environ table */
+	}
+	return env;
+}
+
+/* _lpty_freeenv
+ * 
+ * free an environment created with _lpty_makeenv above
+ * 
+ * Arguments:
+ * 	env	environment created with _lpty_makeenv
+ * 
+ * Returns:
+ * 	-
+ */
+static void _lpty_freeenv(char **env)
+{
+	char *c, **e = env;
+	if (env == NULL) return;
+	while (c = *e++)
+		free(c);
+	free(env);
+}
+
+/* _lpty_execvpe
+ * 
+ * This function will search for an executable file if the specified filename
+ * does not contain a slash (/) character.  The search path is the path
+ * specified in the environment by the PATH variable. If the file can not
+ * be found along the search path, the function will return -1 with errno
+ * set to ENOENT. If the file has been found but we were not allowed to
+ * execute it, we continue to search along the path. If we finally fail,
+ * in this case, the function  will return -1 with errno set to EACCES.
+ * 
+ * Arguments:
+ * 	filename	name (+path) of file to execute
+ * 	argv	arguments to said executable
+ * 	envp	environment for execution attempt.
+ * 
+ * Returns:
+ * 	never if succesfull, -1 on failure.
+ */
+ 
+static int _lpty_execvpe(const char *filename, char *const argv[], char *const envp[])
+{
+	if (strchr(filename, '/')) {
+		return execve(filename, argv, envp);
+	} else {
+		char *protopath = getenv("PATH");
+		char *path = strdup(protopath);
+		char *p = path, *q;
+		char *pbuf = malloc(strlen(protopath) + strlen(filename) + 2);
+		int e = ENOENT;
+
+		/* find individual components of the path and try them */
+		q = strchr(p, ':');
+		while (q) {
+			*q = 0;
+			sprintf(pbuf, "%s/%s", p, filename);
+			execve(pbuf, argv, envp);
+			/* if that succeeded, we will never get here */
+			if (errno == EACCES) e = errno;
+			p = q + 1;
+			q = strchr(p, ':');
+		}
+		sprintf(pbuf, "%s/%s", p, filename);
+		execve(pbuf, argv, envp);
+		if (errno == EACCES) e = errno;
+
+		/* if we got here, execve() failed for all alternatives. */
+		free(pbuf);
+		errno = e;
+		return -1;
+	}
+}
+
 
 /* lpty_startproc
  *
@@ -349,6 +529,15 @@ static int lpty_startproc(lua_State *L)
 				args[i] = lua_tostring(L, 2 + i);
 			args[nargs] = NULL;
 			
+			/* suppress local echo on slave side if wanted */
+			if (pty->flags.nolocalecho) {
+				struct termios ttys;
+
+				tcgetattr(ttyfd, &ttys);
+				ttys.c_lflag &= ~(ECHO);
+				tcsetattr(ttyfd, TCSANOW, &ttys);
+			}
+
 			/* prepare child processes standard file handles */
 			dup2(ttyfd, 0);
 			dup2(ttyfd, 1);
@@ -364,7 +553,13 @@ static int lpty_startproc(lua_State *L)
 
 			/* reset SIGCHLD handler then start our process */
 			signal(SIGCHLD, SIG_DFL);
-			execvp(cmd, (char* const*)args);
+			
+			char **e = _lpty_makeenv(L);
+			if (pty->flags.usepath)
+				_lpty_execvpe(cmd, (char* const*)args, e ? e : environ);
+			else
+				execve(cmd, (char* const*)args, e ? e : environ);
+			_lpty_freeenv(e);
 
 			/* if we ever get here, an error has occurred.
 			 * Note: this error will only be visible as output to the pty from the parent side!
@@ -378,7 +573,7 @@ static int lpty_startproc(lua_State *L)
 			pty->child = child;
 			lua_pushboolean(L, 1);
 		} else {
-			return lpty_error(L, pty->flags.throwerrors, "lpty failed to create child process: %s", strerror(errno));
+			return _lpty_error(L, pty->flags.throwerrors, "lpty failed to create child process: %s", strerror(errno));
 		}
 	} 
 	return 1;
@@ -416,7 +611,6 @@ static int lpty_endproc(lua_State *L)
 		else
 			kill(pty->child, SIGTERM);
 	}
-	pty->child = -1;
 	
 	return 0;
 }
@@ -441,6 +635,132 @@ static int lpty_hasproc(lua_State *L)
 	lua_pushboolean(L, hasit);
 	return 1;
 }
+
+/* lpty_exitstatus
+ *
+ * Tries to find the exit status of the last process running in a pty.
+ *
+ * Arguments:
+ *	L	Lua State
+ *
+ * Lua Stack:
+ *	1	lpty userdata
+ *
+ * Lua Returns:
+ *	+1, +2	false, nil if the is an active subprocess
+ * 			'exit', code if the previous subprocess exited via exit
+ * 			'sig', signum if the previous process was terminated by a signal
+ * 			'unk', 0 if we have no information about the previous process
+ */
+static int lpty_exitstatus(lua_State *L)
+{
+	lPty *pty = lpty_checkLPty(L, 1);
+	if (!_lpty_hasrunningchild(pty) && pty->child != -1) {
+		int i;
+		int r = 0;
+		for (i = 0; i < EXITSTATUS_BUFSIZ; ++i) {
+			if (_lpty_exitstatus_buffer.ecodes[i].child == pty->child) {
+				int status = _lpty_exitstatus_buffer.ecodes[i].status;
+				if (WIFEXITED(status)) {
+					lua_pushliteral(L, "exit");
+					lua_pushnumber(L, WEXITSTATUS(status));
+				} else if (WIFSIGNALED(status)) {
+					lua_pushliteral(L, "sig");
+					lua_pushnumber(L, WTERMSIG(status));
+				}
+				r = 2;
+				break;
+			}
+		}
+		if (i == EXITSTATUS_BUFSIZ) {
+			lua_pushliteral(L, "unk");
+			lua_pushnumber(L, 0);
+		}
+	} else {
+		lua_pushboolean(L, 0);
+		lua_pushnil(L);
+	}
+	return 2;
+}
+
+/*** Environment ***/
+
+/* lpty_getenviron
+ *
+ * return the environment the child process is executed in
+ *
+ * Arguments:
+ *	L	Lua State
+ *
+ * Lua Stack:
+ *	1	lpty userdata
+ *
+ * Lua Returns:
+ *	+1	a table containing the current environment for the child process
+ */
+static int lpty_getenviron(lua_State *L)
+{
+	/* lPty *pty = lpty_checkLPty(L, 1); */
+	char *c = NULL, **e = environ, *p;
+	size_t buflen = 64;
+	char *buf = malloc(buflen);
+	
+	lua_getuservalue(L, 1);
+	lua_rawgeti(L, 2, 1);
+	lua_remove(L, -2);
+
+	if (lua_isnil(L, -1)) {
+		lua_pop(L, 1);
+		lua_newtable(L);
+		while (c = *e++) {
+			if (strlen(c) >= buflen) {
+				buflen += strlen(c);
+				buf = realloc(buf, buflen);
+			}
+			strcpy(buf, c);
+			p = strchr(buf, '=');
+			*p = 0;
+			++p;
+			lua_pushstring(L, (const char*) buf);
+			lua_pushstring(L, (const char*) p);
+			lua_rawset(L, -3);
+		}
+	}
+
+	free(buf);
+
+	return 1;
+}
+
+/* lpty_setenviron
+ *
+ * set the environment the child process is executed in
+ *
+ * Arguments:
+ *	L	Lua State
+ *
+ * Lua Stack:
+ *	1	lpty userdata
+ * 	2	table containing environment for the child process
+ *
+ * Lua Returns:
+ *	-
+ */
+ static int lpty_setenviron(lua_State *L)
+{
+	/* lPty *pty = lpty_checkLPty(L, 1); */
+
+	if (!lua_isnil(L, 2) && !lua_istable(L, 2))
+		luaL_argerror(L, 2, "must be table or nil");
+
+	lua_getuservalue(L, 1);
+	lua_pushvalue(L, 2);
+	lua_rawseti(L, -2, 1);
+	lua_pop(L, 1);
+
+	return 0;
+}
+
 
 /*** Terminal I/O ***/
 
@@ -535,7 +855,7 @@ static int lpty_read(lua_State *L)
 		lua_pushstring(L, buf);
 	/* we don't consider EINTR and ECHILD errors */
 	} else if (errno && (errno != EINTR) && (errno != ECHILD))
-		return lpty_error(L, pty->flags.throwerrors, "lpty read failed: (%d) %s", errno, strerror(errno));
+		return _lpty_error(L, pty->flags.throwerrors, "lpty read failed: (%d) %s", errno, strerror(errno));
 	else
 		lua_pushnil(L);
 	return 1;
@@ -595,11 +915,49 @@ static int lpty_send(lua_State *L)
 		written = write(pty->m_fd, data, strlen(data));
 	if (written >= 0)
 		lua_pushinteger(L, written);
-	else if (errno && (errno != EINTR))
-		return lpty_error(L, pty->flags.throwerrors, "lpty send failed: (%d) %s", errno, strerror(errno));
+	else if (errno && (errno != EINTR) && (errno != ECHILD))
+		return _lpty_error(L, pty->flags.throwerrors, "lpty send failed: (%d) %s", errno, strerror(errno));
 	else
 		lua_pushnil(L);
 	return 1;
+}
+
+/* lpty_flush
+ *
+ * flush data from pty
+ *
+ * Arguments:
+ *	L	Lua State
+ *
+ * Lua Stack:
+ *	1	lpty userdata
+ * 	2	(optional) mode, what to flush
+ *
+ * Lua Returns:
+ *	nothing
+ */
+static int lpty_flush(lua_State *L)
+{
+	lPty *pty = lpty_checkLPty(L, 1);
+	const char *mode = luaL_optstring(L, 2, NULL);
+	int which = TCIOFLUSH;
+	
+	if (mode) {
+		int l = strlen(mode);
+		if (l == 1) {
+			switch (*mode) {
+				case 'i': case 'I':
+					which = TCIFLUSH;
+					break;
+				case 'o': case 'O':
+					which = TCOFLUSH;
+					break;
+			}
+		}
+	}
+	tcflush(pty->m_fd, which);
+	
+	return 0;
 }
 
 /*** utility ***/
@@ -624,7 +982,7 @@ static int lpty_ttyname(lua_State *L)
 	if (name)
 		lua_pushstring(L, name);
 	else
-		return lpty_error(L, pty->flags.throwerrors, "lpty could not fetch slave tty name: %s", strerror(errno));
+		return _lpty_error(L, pty->flags.throwerrors, "lpty could not fetch slave tty name: %s", strerror(errno));
 	return 1;
 }
 
@@ -636,10 +994,14 @@ static const struct luaL_Reg lpty [] ={
 	{"startproc", lpty_startproc},
 	{"endproc", lpty_endproc},
 	{"hasproc", lpty_hasproc},
+	{"exitstatus", lpty_exitstatus},
+	{"getenviron", lpty_getenviron},
+	{"setenviron", lpty_setenviron},
 	{"readok", lpty_readok},
 	{"read", lpty_read},
 	{"sendok", lpty_sendok},
 	{"send", lpty_send},
+	{"flush", lpty_flush},
 	
 	{NULL, NULL}
 };
@@ -650,17 +1012,28 @@ static const struct luaL_Reg lpty [] ={
  */
 int luaopen_lpty(lua_State *L)
 {
-	luaL_register(L, "lpty", lpty);
+	/* itialize exit code buffer */
+	int i;
+	for (i = 0; i < EXITSTATUS_BUFSIZ; ++i) {
+		_lpty_exitstatus_buffer.ecodes[i].child = 0;
+		_lpty_exitstatus_buffer.ecodes[i].status = 0;
+	}
+	_lpty_exitstatus_buffer.cur = 0;
+
+	luaL_newlib(L, lpty);
 
 	/* add lPty userdata metatable */
 	luaL_newmetatable(L, LPTY);
-	luaL_register(L, 0, lpty_meta);
+	luaL_setfuncs(L, lpty_meta, 0);
 	/* methods */
 	lua_pushliteral(L, "__index");
 	lua_pushvalue(L, -3);
 	lua_rawset(L, -3);
 
 	lua_pop(L, 1);
+
+	/* make sure to reset the signal handler on program exit */
+	atexit(_lpty_sigchld_handlerexit_cleanup);
 
 	return 1;
 }
